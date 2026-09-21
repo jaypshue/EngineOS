@@ -34,6 +34,15 @@ the desktop UI. Observation recordings and ZIP packages are not copied into
 history. Individual unreadable history files are skipped so they do not prevent
 the application from starting.
 
+## Git integration
+
+EngineOS uses the system Git CLI through a testable repository abstraction for
+read-first workspace status, recent commits, working-tree/staged/commit diffs,
+local branches, and explicitly requested commits. The desktop exposes the
+read-only status, branch, change, history, and local-branch view through the
+**GIT** button. Commit operations never stage files automatically; callers must
+stage the intended changes before requesting a commit.
+
 Run the automated checks with:
 
 ```text
