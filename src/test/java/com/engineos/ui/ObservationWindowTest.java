@@ -48,6 +48,19 @@ class ObservationWindowTest {
     }
 
     @Test
+    void cancelledRunDoesNotExposeAnEngineeringResultAsCurrent() {
+        var record = new EngineeringHistoryRecord(
+                "run-cancelled", Instant.now(), Instant.now(), Duration.ZERO,
+                "request", "summary", "agent", "provider", "model", "actual",
+                "C:\\projects\\EngineOS", "MAVEN", "CANCELLED", "cancelled", 130, "session",
+                AiUsage.unavailable(), 1L, 1L, 0, 0, 0, List.of(),
+                true, true, "structured terminal record", List.of(), "NOT_RUN", false, null,
+                "cancelled", null, null, Duration.ZERO, "", "");
+
+        assertFalse(ObservationWindow.currentResultMatches("run-cancelled", record));
+    }
+
+    @Test
     void headerSubtitleIsComplete() {
         assertEquals("ENGINEERING CONTROL ENVIRONMENT", ObservationWindow.HEADER_SUBTITLE);
     }

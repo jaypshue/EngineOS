@@ -47,6 +47,10 @@ public interface ObservationRunner {
         return false;
     }
 
+    default Path observationsRoot() {
+        return null;
+    }
+
     record ObservationResult(
             int exitCode,
             String output,

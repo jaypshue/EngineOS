@@ -13,17 +13,18 @@ class EngineeringRequestValidatorTest {
     }
 
     @Test
-    void rejectsRequestWithoutProtocolMarker() {
-        assertFalse(EngineeringRequestValidator.isValid("Please fix the failing test."));
+    void acceptsAPlainEngineeringRequest() {
+        assertTrue(EngineeringRequestValidator.isValid("Please investigate the failing system."));
     }
 
     @Test
     void updatesAsRequestTextChanges() {
         String request = "Goal: investigate.";
-        assertFalse(EngineeringRequestValidator.isValid(request));
+        assertTrue(EngineeringRequestValidator.isValid(request));
         request += "\nENGINEOS_REQUEST_V1";
         assertTrue(EngineeringRequestValidator.isValid(request));
         request = request.replace(EngineeringRequestValidator.MARKER, "");
-        assertFalse(EngineeringRequestValidator.isValid(request));
+        assertTrue(EngineeringRequestValidator.isValid(request));
+        assertFalse(EngineeringRequestValidator.isValid("   "));
     }
 }

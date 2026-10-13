@@ -26,6 +26,10 @@ public record VerificationTargetDeclaration(
             return new VerificationTargetDeclaration(Optional.empty(), false, "");
         }
         String value = matcher.group(1).trim();
+        if ("REPOSITORY".equalsIgnoreCase(value) || "EXISTING SYSTEM".equalsIgnoreCase(value)) {
+            return new VerificationTargetDeclaration(
+                    Optional.of(VerificationTarget.Kind.REPOSITORY), true, "");
+        }
         for (var kind : VerificationTarget.Kind.values()) {
             if (kind.name().equalsIgnoreCase(value)) {
                 return new VerificationTargetDeclaration(Optional.of(kind), true, "");

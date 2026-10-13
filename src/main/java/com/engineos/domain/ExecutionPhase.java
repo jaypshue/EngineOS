@@ -2,5 +2,6 @@ package com.engineos.domain;
 
 public enum ExecutionPhase {
     IMPLEMENTATION,
-    VERIFICATION
+    VERIFICATION,
+    INVESTIGATION
 }

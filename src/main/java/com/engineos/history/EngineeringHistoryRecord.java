@@ -45,7 +45,8 @@ public record EngineeringHistoryRecord(
         Integer verificationExitCode,
         Duration verificationDuration,
         String verificationOutput,
-        String verificationError) {
+        String verificationError,
+        SourceControlHistory sourceControl) {
 
     public EngineeringHistoryRecord(
             String runId,
@@ -84,7 +85,7 @@ public record EngineeringHistoryRecord(
                 sessionDurationMs, linesAdded, linesRemoved, filesModified, modifiedFiles,
                 semanticResultAvailable, semanticResultComplete, engineeringResult,
                 List.of(), observationStatus, observationAvailable, observationLocation, verificationSummary,
-                null, null, null, null, null);
+                null, null, null, null, null, null);
     }
 
     public EngineeringHistoryRecord(
@@ -130,7 +131,54 @@ public record EngineeringHistoryRecord(
                 semanticResultAvailable, semanticResultComplete, engineeringResult, List.of(),
                 observationStatus, observationAvailable, observationLocation, verificationSummary,
                 verificationCommand, verificationExitCode, verificationDuration,
-                verificationOutput, verificationError);
+                verificationOutput, verificationError, null);
+    }
+
+    public EngineeringHistoryRecord(
+            String runId,
+            Instant startedAt,
+            Instant completedAt,
+            Duration duration,
+            String engineeringRequest,
+            String requestSummary,
+            String codingAgent,
+            String provider,
+            String requestedModel,
+            String actualModel,
+            String workspace,
+            String verificationTarget,
+            String finalStatus,
+            String codingResultStatus,
+            Integer exitCode,
+            String sessionId,
+            AiUsage aiUsage,
+            Long apiDurationMs,
+            Long sessionDurationMs,
+            Integer linesAdded,
+            Integer linesRemoved,
+            Integer filesModified,
+            List<String> modifiedFiles,
+            boolean semanticResultAvailable,
+            boolean semanticResultComplete,
+            String engineeringResult,
+            List<String> activity,
+            String observationStatus,
+            boolean observationAvailable,
+            String observationLocation,
+            String verificationSummary,
+            String verificationCommand,
+            Integer verificationExitCode,
+            Duration verificationDuration,
+            String verificationOutput,
+            String verificationError) {
+        this(runId, startedAt, completedAt, duration, engineeringRequest, requestSummary,
+                codingAgent, provider, requestedModel, actualModel, workspace, verificationTarget,
+                finalStatus, codingResultStatus, exitCode, sessionId, aiUsage, apiDurationMs,
+                sessionDurationMs, linesAdded, linesRemoved, filesModified, modifiedFiles,
+                semanticResultAvailable, semanticResultComplete, engineeringResult, activity,
+                observationStatus, observationAvailable, observationLocation, verificationSummary,
+                verificationCommand, verificationExitCode, verificationDuration,
+                verificationOutput, verificationError, null);
     }
 
     public EngineeringHistoryRecord {
@@ -223,6 +271,38 @@ public record EngineeringHistoryRecord(
             String verificationSummary,
             ObservationRunner.ObservationResult observation,
             List<String> activity) {
+        return from(runId, startedAt, completedAt, request, requestSummary, codingAgent, provider,
+                requestedModel, workspace, verificationTarget, finalStatus, codingResultStatus,
+                exitCode, sessionId, aiUsage, details, engineeringResult, observationStatus,
+                observationAvailable, observationLocation, verificationSummary, observation, activity,
+                null);
+    }
+
+    public static EngineeringHistoryRecord from(
+            String runId,
+            Instant startedAt,
+            Instant completedAt,
+            String request,
+            String requestSummary,
+            String codingAgent,
+            String provider,
+            String requestedModel,
+            String workspace,
+            String verificationTarget,
+            String finalStatus,
+            String codingResultStatus,
+            Integer exitCode,
+            String sessionId,
+            AiUsage aiUsage,
+            CopilotResultDetails details,
+            String engineeringResult,
+            String observationStatus,
+            boolean observationAvailable,
+            String observationLocation,
+            String verificationSummary,
+            ObservationRunner.ObservationResult observation,
+            List<String> activity,
+            SourceControlHistory sourceControl) {
         var safeDetails = details == null ? CopilotResultDetails.unavailable() : details;
         return new EngineeringHistoryRecord(
                 runId, startedAt, completedAt,
@@ -240,7 +320,8 @@ public record EngineeringHistoryRecord(
                 observation == null ? null : observation.exitCode(),
                 observation == null ? null : observation.duration(),
                 observation == null ? null : observation.output(),
-                observation == null ? null : observation.error());
+                observation == null ? null : observation.error(),
+                sourceControl);
     }
 
     @JsonIgnore

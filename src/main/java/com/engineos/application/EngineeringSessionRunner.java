@@ -16,6 +16,11 @@ import com.engineos.infrastructure.WorkspaceSnapshot;
 import com.engineos.history.EngineeringHistoryRecord;
 import com.engineos.history.EngineeringHistoryRepository;
 import com.engineos.history.NoOpEngineeringHistoryRepository;
+import com.engineos.history.SourceControlHistory;
+import com.engineos.infrastructure.git.GitRepository;
+import com.engineos.infrastructure.git.GitCommitResult;
+import com.engineos.infrastructure.git.GitSnapshot;
+import com.engineos.infrastructure.git.ProcessGitRepository;
 import com.engineos.observation.ObservationRunner;
 import com.engineos.observation.ObservationEvidencePackageWriter;
 import com.engineos.observation.VerificationTarget;
@@ -37,24 +42,27 @@ public final class EngineeringSessionRunner {
     private final ICodingAgent coder;
     private final ObservationRunner observationRunner;
     private final EngineeringHistoryRepository history;
+    private final GitRepository git;
     private final AtomicBoolean cancellationRequested = new AtomicBoolean();
 
     public EngineeringSessionRunner(ICodingAgent coder, ObservationRunner observationRunner) {
-        this(new RepositoryDiscovery(), coder, observationRunner, new NoOpEngineeringHistoryRepository());
+        this(new RepositoryDiscovery(), coder, observationRunner,
+                new NoOpEngineeringHistoryRepository(), new ProcessGitRepository());
     }
 
     EngineeringSessionRunner(
             RepositoryDiscovery discovery,
             ICodingAgent coder,
             ObservationRunner observationRunner) {
-        this(discovery, coder, observationRunner, new NoOpEngineeringHistoryRepository());
+        this(discovery, coder, observationRunner, new NoOpEngineeringHistoryRepository(),
+                new ProcessGitRepository());
     }
 
     public EngineeringSessionRunner(
             ICodingAgent coder,
             ObservationRunner observationRunner,
             EngineeringHistoryRepository history) {
-        this(new RepositoryDiscovery(), coder, observationRunner, history);
+        this(new RepositoryDiscovery(), coder, observationRunner, history, new ProcessGitRepository());
     }
 
     EngineeringSessionRunner(
@@ -62,10 +70,20 @@ public final class EngineeringSessionRunner {
             ICodingAgent coder,
             ObservationRunner observationRunner,
             EngineeringHistoryRepository history) {
+        this(discovery, coder, observationRunner, history, new ProcessGitRepository());
+    }
+
+    EngineeringSessionRunner(
+            RepositoryDiscovery discovery,
+            ICodingAgent coder,
+            ObservationRunner observationRunner,
+            EngineeringHistoryRepository history,
+            GitRepository git) {
         this.discovery = Objects.requireNonNull(discovery);
         this.coder = Objects.requireNonNull(coder);
         this.observationRunner = Objects.requireNonNull(observationRunner);
         this.history = Objects.requireNonNull(history);
+        this.git = Objects.requireNonNull(git);
         this.workflow = new EngineOsWorkflow(
                 this.discovery,
                 new DeterministicEngineerAgent(new AgentProvider("local", "engineer-dev")),
@@ -78,6 +96,10 @@ public final class EngineeringSessionRunner {
 
     public EngineeringHistoryRepository history() {
         return history;
+    }
+
+    public GitSnapshot sourceControl(Path project) {
+        return git.snapshot(project);
     }
 
     public VerificationPlan verificationPlan(Path project, String prompt) {
@@ -110,6 +132,12 @@ public final class EngineeringSessionRunner {
 
     public SessionResult run(Path project, String prompt, String selectedModel,
                              Consumer<SessionState> stateSink, Consumer<String> activitySink) {
+        return run(project, prompt, selectedModel, null, stateSink, activitySink);
+    }
+
+    public SessionResult run(Path project, String prompt, String selectedModel,
+                             GitSnapshot sourceControlBaseline,
+                             Consumer<SessionState> stateSink, Consumer<String> activitySink) {
         cancellationRequested.set(false);
         Instant startedAt = Instant.now();
         String runId = UUID.randomUUID().toString();
@@ -129,6 +157,8 @@ public final class EngineeringSessionRunner {
             var task = workflow.receiveIntent(workspace, prompt, model);
             var policy = ExecutionPolicy.forRequest(EngineeringRequest.parse(prompt));
             var executionStarted = Instant.now();
+            var sourceControlBefore = sourceControlBaseline == null
+                    ? git.snapshot(project) : sourceControlBaseline;
             var baseline = WorkspaceSnapshot.capture(project);
             var declaration = VerificationTargetDeclaration.parse(prompt);
             if (!declaration.error().isBlank()) {
@@ -163,6 +193,7 @@ public final class EngineeringSessionRunner {
                         });
             }
             var finalSnapshot = WorkspaceSnapshot.capture(project);
+            var sourceControlAfter = git.snapshot(project);
             var changedFiles = finalSnapshot.changedSince(baseline);
             var finalChanges = WorkspaceChangeSummary.capture(project);
             boolean boundaryViolation = !policy.workspaceModificationAllowed() && !changedFiles.isEmpty();
@@ -181,20 +212,24 @@ public final class EngineeringSessionRunner {
                 activitySink.accept(activities.getLast());
                 return failure(runId, startedAt, project, prompt, selectedModel,
                         "Verification changed protected workspace files: " + changedFiles,
-                        coding, null, activities, null, stateSink, control, finalChanges);
+                        coding, null, activities, null, stateSink, control, finalChanges,
+                        sourceControlBefore, sourceControlAfter);
             }
             if (coding.exitCode() == 130 || cancellationRequested.get()) {
                 activities.add("Coding agent execution cancelled.");
                 activitySink.accept(activities.getLast());
                 return cancelled(runId, startedAt, project, prompt, selectedModel,
-                        coding, activities, stateSink, control, finalChanges);
+                        coding, activities, stateSink, control, finalChanges,
+                        sourceControlBefore, sourceControlAfter);
             }
             if (!coding.succeeded()) {
                 return failure(runId, startedAt, project, prompt, selectedModel,
                         coding.summary() + " " + coding.standardError(), coding, null, activities, null,
-                        stateSink, control, finalChanges);
+                        stateSink, control, finalChanges, sourceControlBefore, sourceControlAfter);
             }
-            activities.add("Targeted verification: running the resolved verification target.");
+            activities.add(verificationTarget.kind() == VerificationTarget.Kind.REPOSITORY
+                    ? "Repository investigation target: capturing the investigation result."
+                    : "Targeted verification: running the resolved verification target.");
             activitySink.accept(activities.getLast());
             stateSink.accept(SessionState.RUNNING_OBSERVATION);
             var observation = observationRunner.run(
@@ -207,7 +242,8 @@ public final class EngineeringSessionRunner {
                 activitySink.accept(activities.getLast());
                 return failure(runId, startedAt, project, prompt, selectedModel,
                         "Observation failed: " + observation.error(), coding, observation,
-                        activities, verificationTarget, stateSink, control, finalChanges);
+                        activities, verificationTarget, stateSink, control, finalChanges,
+                        sourceControlBefore, sourceControlAfter);
             }
             if (policy.phase() == ExecutionPhase.VERIFICATION) {
                 var observationChanges = WorkspaceSnapshot.capture(project).changedSince(baseline);
@@ -218,15 +254,19 @@ public final class EngineeringSessionRunner {
                             "Verification changed protected workspace files during observation: "
                                     + observationChanges,
                             coding, observation, activities, verificationTarget, stateSink, control,
-                            WorkspaceChangeSummary.capture(project));
+                            WorkspaceChangeSummary.capture(project),
+                            sourceControlBefore, git.snapshot(project));
                 }
             }
-            activities.add("Targeted verification passed; review evidence gaps before broadening confidence.");
+            sourceControlAfter = git.snapshot(project);
+            activities.add(verificationTarget.kind() == VerificationTarget.Kind.REPOSITORY
+                    ? "Repository investigation result captured; review evidence gaps before broadening confidence."
+                    : "Targeted verification passed; review evidence gaps before broadening confidence.");
             activitySink.accept(activities.getLast());
             stateSink.accept(SessionState.GREEN);
             return complete(runId, startedAt, project, prompt, selectedModel,
                     new SessionResult(SessionState.GREEN, "GREEN - Observation ready", coding, observation, activities),
-                    verificationTarget, control, finalChanges);
+                    verificationTarget, control, finalChanges, sourceControlBefore, sourceControlAfter);
         } catch (RuntimeException exception) {
             return failure(runId, startedAt, project, prompt, selectedModel,
                     "Session failed: " + exception.getMessage(), null, null, activities, stateSink);
@@ -243,6 +283,31 @@ public final class EngineeringSessionRunner {
         }
         coder.cancel();
         return true;
+    }
+
+    public GitCommitResult commit(Path project, String runId, String message) {
+        var result = git.commit(project, message);
+        if (result.succeeded() && runId != null && !runId.isBlank()) {
+            history.get(runId).ifPresent(record -> {
+                var sourceControl = record.sourceControl();
+                if (sourceControl != null) {
+                    history.save(new EngineeringHistoryRecord(
+                            record.runId(), record.startedAt(), record.completedAt(), record.duration(),
+                            record.engineeringRequest(), record.requestSummary(), record.codingAgent(),
+                            record.provider(), record.requestedModel(), record.actualModel(), record.workspace(),
+                            record.verificationTarget(), record.finalStatus(), record.codingResultStatus(),
+                            record.exitCode(), record.sessionId(), record.aiUsage(), record.apiDurationMs(),
+                            record.sessionDurationMs(), record.linesAdded(), record.linesRemoved(),
+                            record.filesModified(), record.modifiedFiles(), record.semanticResultAvailable(),
+                            record.semanticResultComplete(), record.engineeringResult(), record.activity(),
+                            record.observationStatus(), record.observationAvailable(), record.observationLocation(),
+                            record.verificationSummary(), record.verificationCommand(),
+                            record.verificationExitCode(), record.verificationDuration(), record.verificationOutput(),
+                            record.verificationError(), sourceControl.withCommit(result.commitHash(), message)));
+                }
+            });
+        }
+        return result;
     }
 
     public record VerificationPlan(
@@ -275,17 +340,19 @@ public final class EngineeringSessionRunner {
             Consumer<SessionState> stateSink) {
         return failure(runId, startedAt, project, prompt, selectedModel, detail,
                 coding, observation, activities, null, stateSink, null,
-                WorkspaceChangeSummary.capture(project));
+                WorkspaceChangeSummary.capture(project), null, git.snapshot(project));
     }
 
     private SessionResult cancelled(
             String runId, Instant startedAt, Path project, String prompt, String selectedModel,
             CodingResult coding, List<String> activities, Consumer<SessionState> stateSink,
-            ExecutionControl control, WorkspaceChangeSummary finalChanges) {
+            ExecutionControl control, WorkspaceChangeSummary finalChanges,
+            GitSnapshot sourceControlBefore, GitSnapshot sourceControlAfter) {
         stateSink.accept(SessionState.CANCELLED);
         return complete(runId, startedAt, project, prompt, selectedModel,
                 new SessionResult(SessionState.CANCELLED, "CANCELLED - Implementation not complete",
-                        coding, null, activities), null, control, finalChanges);
+                        coding, null, activities), null, control, finalChanges,
+                sourceControlBefore, sourceControlAfter);
     }
 
     private SessionResult failure(
@@ -301,11 +368,13 @@ public final class EngineeringSessionRunner {
             VerificationTarget verificationTarget,
             Consumer<SessionState> stateSink,
             ExecutionControl control,
-            WorkspaceChangeSummary finalChanges) {
+            WorkspaceChangeSummary finalChanges,
+            GitSnapshot sourceControlBefore,
+            GitSnapshot sourceControlAfter) {
         stateSink.accept(SessionState.FAILED);
         return complete(runId, startedAt, project, prompt, selectedModel,
                 new SessionResult(SessionState.FAILED, "FAILED - " + detail, coding, observation, activities),
-                verificationTarget, control, finalChanges);
+                verificationTarget, control, finalChanges, sourceControlBefore, sourceControlAfter);
     }
 
     private SessionResult complete(
@@ -317,7 +386,9 @@ public final class EngineeringSessionRunner {
             SessionResult result,
             VerificationTarget verificationTarget,
             ExecutionControl control,
-            WorkspaceChangeSummary finalChanges) {
+            WorkspaceChangeSummary finalChanges,
+            GitSnapshot sourceControlBefore,
+            GitSnapshot sourceControlAfter) {
         CodingResult coding = result.coding();
         var observation = result.observation();
         var details = coding == null ? null : coding.details();
@@ -334,19 +405,33 @@ public final class EngineeringSessionRunner {
                 coding == null ? null : coding.sessionId(),
                 coding == null ? null : coding.usage(),
                 persistedDetails,
-                coding == null ? result.detail() : coding.report(persistedDetails) + "\n" + result.detail(),
+                coding == null ? result.detail() : engineeringReport(coding, persistedDetails, result.detail()),
                 observation == null ? "NOT_RUN" : observation.succeeded() ? "SUCCEEDED" : "FAILED",
                 observation != null && observation.succeeded(),
                 null,
                 verificationTarget == null ? null : verificationTarget.kind().name(),
                 observation,
-                result.activity());
+                result.activity(),
+                SourceControlHistory.from(sourceControlBefore, sourceControlAfter));
         history.save(record);
         var completed = result.withEngineeringResult(toEngineeringResult(
                 result, prompt, record, coder.provider().displayName(), control));
         ObservationEvidencePackageWriter.writeIfAvailable(
-                observation, prompt, completed.engineeringResult());
+                observation, prompt, completed.engineeringResult(),
+                coding == null ? null : coding.standardOutput(),
+                observationRunner.observationsRoot());
         return completed;
+    }
+
+    private static String engineeringReport(
+            CodingResult coding,
+            CopilotResultDetails details,
+            String detail) {
+        String report = coding.report(details) + "\n" + detail;
+        if (coding.standardOutput() == null || coding.standardOutput().isBlank()) {
+            return report;
+        }
+        return report + "\n\nCODING AGENT FINDINGS\n" + coding.standardOutput().trim();
     }
 
     private static com.engineos.domain.EngineeringResult toEngineeringResult(
@@ -405,6 +490,8 @@ public final class EngineeringSessionRunner {
                 : "SUFFICIENT".equals(assessment.evidenceStatus()) ? "VERIFIED"
                 : "INSUFFICIENT_EVIDENCE";
         String implementationStatus = cancelled ? "CANCELLED"
+                : control != null && control.phase() == ExecutionPhase.INVESTIGATION
+                ? coding != null && coding.succeeded() ? "INVESTIGATED" : "NOT_INVESTIGATED"
                 : coding != null && coding.succeeded() ? "IMPLEMENTED" : "NOT_IMPLEMENTED";
         return new com.engineos.domain.EngineeringResult(
                 prompt,

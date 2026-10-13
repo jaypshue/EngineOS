@@ -66,12 +66,12 @@ public final class DesktopRequestLifecycle {
             }
             case FAILED -> {
                 state = State.FAILED;
-                resultAvailable = true;
+                resultAvailable = false;
                 codingAgentActive = false;
             }
             case CANCELLED -> {
                 state = State.CANCELLED;
-                resultAvailable = true;
+                resultAvailable = false;
                 codingAgentActive = false;
             }
         }
@@ -79,7 +79,7 @@ public final class DesktopRequestLifecycle {
 
     public void cancelled() {
         state = State.CANCELLED;
-        resultAvailable = true;
+        resultAvailable = false;
         codingAgentActive = false;
     }
 
@@ -102,7 +102,7 @@ public final class DesktopRequestLifecycle {
             case FAILED -> resultAvailable
                     ? "Request failed/terminated; Engineering Result available."
                     : "Request failed/terminated.";
-            case CANCELLED -> "Request cancelled/terminated; Engineering Result available.";
+            case CANCELLED -> "Request cancelled/terminated.";
         };
     }
 }

@@ -10,7 +10,8 @@ public record VerificationTarget(Kind kind, Path workspace, String windowTitle) 
     public enum Kind {
         INTASSIST,
         ENGINEOS,
-        MAVEN
+        MAVEN,
+        REPOSITORY
     }
 
     public VerificationTarget {
@@ -33,8 +34,7 @@ public record VerificationTarget(Kind kind, Path workspace, String windowTitle) 
         if (files.stream().anyMatch(path -> path.endsWith("pom.xml"))) {
             return new VerificationTarget(Kind.MAVEN, workspace.root(), "Maven");
         }
-        throw new IllegalArgumentException(
-                "No supported verification target was found in workspace: " + workspace.root());
+        return new VerificationTarget(Kind.REPOSITORY, workspace.root(), workspace.repositoryName());
     }
 
     public List<String> verificationCommand() {

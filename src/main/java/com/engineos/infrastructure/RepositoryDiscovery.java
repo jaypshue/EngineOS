@@ -2,15 +2,26 @@ package com.engineos.infrastructure;
 
 import com.engineos.domain.Evidence;
 import com.engineos.domain.WorkspaceContext;
+import com.engineos.infrastructure.git.GitRepository;
+import com.engineos.infrastructure.git.ProcessGitRepository;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.Comparator;
-import java.util.List;
 
 public final class RepositoryDiscovery {
+    private final GitRepository git;
+
+    public RepositoryDiscovery() {
+        this(new ProcessGitRepository());
+    }
+
+    public RepositoryDiscovery(GitRepository git) {
+        this.git = git;
+    }
+
     public WorkspaceContext load(Path root) {
         if (root == null || !Files.isDirectory(root)) {
             throw new IllegalArgumentException("Workspace directory does not exist: " + root);
@@ -21,10 +32,9 @@ public final class RepositoryDiscovery {
                     .filter(path -> !path.toString().contains("target"))
                     .sorted(Comparator.naturalOrder())
                     .toList();
-            var gitBranch = runGit(root, "branch", "--show-current").trim();
-            var status = runGit(root, "status", "--porcelain").trim();
+            var gitStatus = git.status(root);
             return new WorkspaceContext(root.toAbsolutePath().normalize(), root.getFileName().toString(),
-                    gitBranch, status.isEmpty(), files);
+                    gitStatus.branch(), gitStatus.clean(), files);
         } catch (IOException exception) {
             throw new IllegalStateException("Unable to discover workspace: " + exception.getMessage(), exception);
         }
@@ -38,18 +48,4 @@ public final class RepositoryDiscovery {
                 Instant.now());
     }
 
-    private static String runGit(Path root, String... arguments) throws IOException {
-        try {
-            var command = new java.util.ArrayList<String>();
-            command.add("git");
-            command.addAll(List.of(arguments));
-            var process = new ProcessBuilder(command).directory(root.toFile()).start();
-            var result = new String(process.getInputStream().readAllBytes());
-            process.waitFor();
-            return result;
-        } catch (InterruptedException exception) {
-            Thread.currentThread().interrupt();
-            throw new IOException("Git discovery interrupted", exception);
-        }
-    }
 }

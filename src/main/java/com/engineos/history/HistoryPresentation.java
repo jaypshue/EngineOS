@@ -81,6 +81,7 @@ public final class HistoryPresentation {
                 + "\n\nOBSERVATION\nStatus: " + value(record.observationStatus())
                 + "\nAvailable: " + record.observationAvailable()
                 + (record.observationLocation() == null ? "" : "\nLocation: " + record.observationLocation())
+                + sourceControl(record)
                 + "\n\nCODING AGENT REPORT / ENGINEERING RESULT\n" + value(record.engineeringResult())
                 + "\n\nCODING AGENT ACTIVITY\n" + activity(record)
                 + "\n\nSUPERVISION\nStatus: " + value(record.finalStatus())
@@ -95,6 +96,7 @@ public final class HistoryPresentation {
         } else if (!record.semanticResultComplete()) {
             uncertainties.add("Semantic Copilot result incomplete.");
         }
+
         if (record.sessionId() == null) {
             uncertainties.add("Copilot session unavailable.");
         }
@@ -107,6 +109,34 @@ public final class HistoryPresentation {
             uncertainties.add("Verification did not run; requested behavior remains unverified.");
         }
         return uncertainties.isEmpty() ? "None recorded." : String.join("\n", uncertainties);
+    }
+
+    private static String sourceControl(EngineeringHistoryRecord record) {
+        var source = record.sourceControl();
+        if (source == null) {
+            return "";
+        }
+        var before = source.before();
+        var after = source.after();
+        return "\n\nSOURCE CONTROL\nProvider: " + value(source.provider())
+                + "\nRepository: " + value(source.repositoryRoot())
+                + "\nBranch before: " + stateValue(before, true)
+                + "\nBefore: " + stateValue(before, false)
+                + "\nBranch after: " + stateValue(after, true)
+                + "\nCurrent: " + stateValue(after, false)
+                + "\nWorking tree: " + (after == null ? "unavailable" : after.clean() ? "CLEAN" : "CHANGED")
+                + "\nChanges: " + (after == null ? "unavailable" : after.changedFiles().size() + " files")
+                + " (+" + (after == null ? 0 : after.linesAdded())
+                + " / -" + (after == null ? 0 : after.linesRemoved()) + ")"
+                + (source.commitSha().isBlank() ? "" : "\nCommit: " + source.commitSha()
+                + "\nMessage: " + source.commitMessage());
+    }
+
+    private static String stateValue(SourceControlHistory.State state, boolean branch) {
+        if (state == null) {
+            return "unavailable";
+        }
+        return value(branch ? state.branch() : state.headSha());
     }
 
     private static String evidenceStatus(EngineeringHistoryRecord record) {

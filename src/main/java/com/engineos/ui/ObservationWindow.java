@@ -4,6 +4,11 @@ import com.engineos.application.EngineOsService;
 import com.engineos.agent.CopilotModelCatalog;
 import com.engineos.history.EngineeringHistoryRecord;
 import com.engineos.history.HistoryPresentation;
+import com.engineos.infrastructure.git.GitBranch;
+import com.engineos.infrastructure.git.GitRepository;
+import com.engineos.infrastructure.git.GitStatus;
+import com.engineos.infrastructure.git.GitSnapshot;
+import com.engineos.infrastructure.git.ProcessGitRepository;
 import com.engineos.observation.CompletedObservation;
 import com.engineos.observation.ObservationAttachmentPreparer;
 import com.engineos.observation.ObservationPackageService;
@@ -20,6 +25,7 @@ import javax.swing.JFileChooser;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
+import javax.swing.JOptionPane;
 import javax.swing.JTextArea;
 import javax.swing.JTextField;
 import javax.swing.SwingUtilities;
@@ -41,6 +47,7 @@ import java.awt.FlowLayout;
 import java.awt.Font;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
+import java.awt.GridLayout;
 import java.awt.Insets;
 import java.awt.GradientPaint;
 import java.awt.Graphics;
@@ -74,6 +81,12 @@ public final class ObservationWindow {
     private static final int HISTORY_TRANSITION_DURATION_MS = 840;
     private static final int HISTORY_TRANSITION_TICK_MS = 40;
     private static final String ENGINEOS_STARTUP_ACTIVITY = "EngineOS: Starting Coding Agent...";
+    private static final String DEFAULT_INVESTIGATION_REQUEST = """
+            Investigate this existing system. Identify its architecture, major
+            components, dependencies, entry points, APIs, data flow,
+            configuration, and important implementation relationships.
+            Do not modify the repository. Report what you can establish from
+            the existing code and configuration.""";
 
     private static final Font DISPLAY_FONT = new Font("Segoe UI", Font.BOLD, 24);
     private static final Font WORDMARK_FONT = new Font("Segoe UI", Font.BOLD | Font.ITALIC, 36);
@@ -85,6 +98,7 @@ public final class ObservationWindow {
     private final ObservationPackageService packages;
     private final ObservationAttachmentPreparer attachments;
     private final EngineOsService sessions;
+    private final GitRepository git;
     private final JLabel status = new JLabel();
     private final JLabel requestStatus = new JLabel();
     private final JLabel resultStatus = new JLabel();
@@ -94,22 +108,31 @@ public final class ObservationWindow {
     private final JButton cancelButton = new JButton("STOP CODING AGENT");
     private final JButton viewTargetButton = new JButton("VIEW ACTIVE TARGET");
     private final JButton historyButton = new JButton("HISTORY");
+    private final JButton gitButton = new JButton("GIT");
     private final JButton browseButton = new JButton("BROWSE...");
     private final JLabel requestValidation = new JLabel();
     private final JLabel workspaceTargetLabel = new JLabel();
     private final JLabel verificationTargetLabel = new JLabel();
+    private final JLabel sourceControlLabel = new JLabel();
+    private final JLabel preflightLabel = new JLabel();
+    private final JLabel preflightSummaryLabel = new JLabel();
+    private final JButton preflightToggle = new JButton("EXPAND \u25BE");
+    private final JPanel preflightPanel = new JPanel(new BorderLayout(0, 6));
     private final JTextField projectField = new JTextField(DEFAULT_PROJECT);
     private final JTextArea promptArea = new JTextArea(8, 60);
+    private final JTextArea resultArea = new JTextArea(8, 60);
     private final JTextArea activityArea = new JTextArea(5, 60);
     private final JTextArea usageArea = new JTextArea(8, 30);
     private final JScrollPane activityScroll = new JScrollPane(activityArea);
     private final JPanel activityPanel = new JPanel(new BorderLayout(0, 6));
+    private final JPanel resultPanel = new JPanel(new BorderLayout(0, 6));
     private final JPanel activityHeading = new JPanel(new BorderLayout(8, 0));
     private final JLabel activityIndicator = new JLabel("●");
     private final JLabel activityHeadingLabel = new JLabel("CODING AGENT ACTIVITY");
     private final JLabel activityRetention = new JLabel();
     private final JComboBox<String> codingAgent = new JComboBox<>(new String[]{"GitHub Copilot"});
     private final JComboBox<String> model = new JComboBox<>();
+    private final JComboBox<String> targetSelector = new JComboBox<>();
     private final JPanel onboardingPanel = new JPanel(new BorderLayout(16, 12));
     private final OnboardingPreferences onboarding = new OnboardingPreferences();
     private final JFrame frame = new JFrame("EngineOS");
@@ -117,6 +140,9 @@ public final class ObservationWindow {
     private CompletedObservation currentObservation;
     private String currentRunId;
     private EngineeringHistoryRecord currentHistoryRecord;
+    private GitSnapshot currentGitSnapshot;
+    private Path currentGitWorkspace;
+    private boolean preflightExpanded;
     private String serviceError;
     private int liveActivityCount;
     private Timer serviceRetryTimer;
@@ -125,15 +151,22 @@ public final class ObservationWindow {
             HISTORY_TRANSITION_TICK_MS, event -> animateHistoryTransition());
     private boolean activityPulseBright;
     private long historyTransitionStartedAt;
+    private long requestGeneration;
+    private boolean updatingTargetSelector;
 
     public ObservationWindow(Path observationsRoot) {
-        this(observationsRoot, null);
+        this(observationsRoot, null, new ProcessGitRepository());
     }
 
     public ObservationWindow(Path observationsRoot, EngineOsService sessions) {
+        this(observationsRoot, sessions, new ProcessGitRepository());
+    }
+
+    ObservationWindow(Path observationsRoot, EngineOsService sessions, GitRepository git) {
         packages = new ObservationPackageService(observationsRoot);
         attachments = new ObservationAttachmentPreparer(packages);
         this.sessions = sessions;
+        this.git = git;
         configure();
     }
 
@@ -160,9 +193,11 @@ public final class ObservationWindow {
             model.setSelectedItem(onboarding.restoreModel(availableModels, "auto"));
         }
         projectField.setText(onboarding.restoreWorkspace(DEFAULT_PROJECT));
+        promptArea.setText(DEFAULT_INVESTIGATION_REQUEST);
 
         configureControls();
         configureRequestValidation();
+        refreshSourceControl();
         if (serviceError != null) {
             status.setText(serviceError);
             status.setForeground(ERROR);
@@ -174,6 +209,7 @@ public final class ObservationWindow {
         root.setBorder(new EmptyBorder(20, 24, 18, 24));
         root.add(buildHeader(), BorderLayout.NORTH);
         root.add(buildMainContent(), BorderLayout.CENTER);
+        root.add(buildWorkflowFooter(), BorderLayout.SOUTH);
 
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         frame.addWindowListener(new WindowAdapter() {
@@ -214,6 +250,7 @@ public final class ObservationWindow {
                 status.setToolTipText(null);
                 updateRequestValidation();
                 updateWorkspaceState();
+                updateVerificationPlan();
                 serviceRetryTimer.stop();
             } catch (IllegalStateException exception) {
                 status.setText("EngineOS Service unavailable; retrying...");
@@ -241,11 +278,13 @@ public final class ObservationWindow {
         styleSecondaryButton(cancelButton);
         styleSecondaryButton(sendButton);
         styleSecondaryButton(viewTargetButton);
+        styleSecondaryButton(gitButton);
         styleSecondaryButton(historyButton);
         styleSecondaryButton(browseButton);
         styleSecondaryButton(codingAgent);
         styleTextField(projectField);
         styleTextArea(promptArea);
+        styleTextArea(resultArea);
         styleTextArea(activityArea);
         styleTextArea(usageArea);
         activityRetention.setFont(SMALL_FONT);
@@ -259,14 +298,32 @@ public final class ObservationWindow {
                 new EmptyBorder(6, 10, 6, 10)));
         setActivityActive(false);
         usageArea.setEditable(false);
+        resultArea.setEditable(false);
+        resultArea.setLineWrap(true);
+        resultArea.setWrapStyleWord(true);
+        resultArea.setText("The Coding Agent observation/result will appear here after submission.");
+        resultPanel.setOpaque(false);
+        resultPanel.setVisible(false);
         usageArea.setText("AI usage will appear here after a completed run.");
         styleScrollPane(activityScroll);
         activityScroll.setVisible(false);
         viewTargetButton.setEnabled(false);
         historyButton.setEnabled(serviceError == null && isValidWorkspace());
+        gitButton.setEnabled(isValidWorkspace());
         historyButton.addActionListener(event -> showHistory());
+        gitButton.addActionListener(event -> showGitStatus());
 
         model.addActionListener(event -> onboarding.saveModel((String) model.getSelectedItem()));
+        model.addActionListener(event -> renderPreflight());
+        targetSelector.addItem("WORKSPACE DEFAULT");
+        for (var kind : com.engineos.observation.VerificationTarget.Kind.values()) {
+            targetSelector.addItem(kind.name());
+        }
+        targetSelector.addActionListener(event -> {
+            if (!updatingTargetSelector) {
+                applyTargetSelection();
+            }
+        });
         projectField.getDocument().addDocumentListener(new DocumentListener() {
             @Override
             public void insertUpdate(DocumentEvent event) {
@@ -321,6 +378,8 @@ public final class ObservationWindow {
                 requestLifecycle.replaceWithRecognizedRequest();
                 updateRequestValidation();
                 updateVerificationPlan();
+                refreshSourceControl();
+                invalidateCurrentRequestPresentation();
             }
 
             @Override
@@ -328,6 +387,7 @@ public final class ObservationWindow {
                 requestLifecycle.replaceWithRecognizedRequest();
                 updateRequestValidation();
                 updateVerificationPlan();
+                invalidateCurrentRequestPresentation();
             }
 
             @Override
@@ -335,6 +395,7 @@ public final class ObservationWindow {
                 requestLifecycle.replaceWithRecognizedRequest();
                 updateRequestValidation();
                 updateVerificationPlan();
+                invalidateCurrentRequestPresentation();
             }
         });
         updateRequestValidation();
@@ -411,12 +472,36 @@ public final class ObservationWindow {
     private JPanel buildMainContent() {
         var content = new JPanel(new BorderLayout(0, 10));
         content.setOpaque(false);
-        var workflow = new JPanel(new BorderLayout(0, 10));
+        content.setPreferredSize(new Dimension(0, 0));
+        content.setMinimumSize(new Dimension(0, 0));
+        var workflow = new ScrollablePanel(new BorderLayout(0, 10));
         workflow.setOpaque(false);
         workflow.add(buildAgentCard(), BorderLayout.NORTH);
         workflow.add(buildRequestCard(), BorderLayout.CENTER);
-        content.add(workflow, BorderLayout.CENTER);
+        var workflowScroll = new JScrollPane(workflow);
+        workflowScroll.setBorder(null);
+        workflowScroll.setOpaque(false);
+        workflowScroll.setPreferredSize(new Dimension(0, 0));
+        workflowScroll.setMinimumSize(new Dimension(0, 0));
+        workflowScroll.getViewport().setOpaque(false);
+        workflowScroll.setHorizontalScrollBarPolicy(
+                JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+        workflowScroll.setVerticalScrollBarPolicy(
+                JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED);
+        content.add(workflowScroll, BorderLayout.CENTER);
+
         return content;
+    }
+
+    private JPanel buildWorkflowFooter() {
+        var footer = new JPanel();
+        footer.setOpaque(false);
+        footer.setLayout(new javax.swing.BoxLayout(
+                footer, javax.swing.BoxLayout.Y_AXIS));
+        footer.add(buildPreflightPanel());
+        footer.add(javax.swing.Box.createVerticalStrut(8));
+        footer.add(buildActionRow());
+        return footer;
     }
 
     private JPanel buildRequestCard() {
@@ -426,18 +511,27 @@ public final class ObservationWindow {
         var heading = buildSectionHeading(
                 SectionGlyph.Kind.REQUEST,
                 "ENGINEERING REQUEST",
-                "Paste the request prepared by your Engineering Partner (ChatGPT, Claude, etc.).");
+                "Describe what you want EngineOS to establish about the selected existing system.");
 
         var editorScroll = new JScrollPane(promptArea);
         styleScrollPane(editorScroll);
-        editorScroll.setPreferredSize(new Dimension(0, 260));
-        editorScroll.setMinimumSize(new Dimension(0, 210));
-        card.setMinimumSize(new Dimension(0, 330));
+        editorScroll.setPreferredSize(new Dimension(0, 150));
+        editorScroll.setMinimumSize(new Dimension(0, 120));
+        card.setMinimumSize(new Dimension(0, 280));
         configureOnboarding();
         var requestEditor = new JPanel(new BorderLayout(0, 10));
         requestEditor.setOpaque(false);
-        requestEditor.add(onboardingPanel, BorderLayout.NORTH);
         requestEditor.add(editorScroll, BorderLayout.CENTER);
+        var resultScroll = new JScrollPane(resultArea);
+        styleScrollPane(resultScroll);
+        resultScroll.setPreferredSize(new Dimension(0, 180));
+        resultPanel.add(buildSectionHeading(
+                SectionGlyph.Kind.OBSERVATION,
+                "OBSERVATION / RESULT",
+                "The returned Coding Agent result and EngineOS evidence for this request."),
+                BorderLayout.NORTH);
+        resultPanel.add(resultScroll, BorderLayout.CENTER);
+        requestEditor.add(resultPanel, BorderLayout.SOUTH);
 
         var validationRow = new JPanel(new BorderLayout(12, 0));
         validationRow.setOpaque(false);
@@ -459,8 +553,13 @@ public final class ObservationWindow {
 
         var requestFooter = new JPanel(new BorderLayout(0, 10));
         requestFooter.setOpaque(false);
-        requestFooter.add(lower, BorderLayout.NORTH);
-        requestFooter.add(buildActionRow(), BorderLayout.SOUTH);
+        var footerStack = new JPanel();
+        footerStack.setOpaque(false);
+        footerStack.setLayout(new javax.swing.BoxLayout(
+                footerStack, javax.swing.BoxLayout.Y_AXIS));
+        footerStack.add(onboardingPanel);
+        footerStack.add(lower);
+        requestFooter.add(footerStack, BorderLayout.NORTH);
 
         card.add(heading, BorderLayout.NORTH);
         card.add(requestEditor, BorderLayout.CENTER);
@@ -472,110 +571,94 @@ public final class ObservationWindow {
         var card = cardPanel();
         card.setLayout(new BorderLayout(0, 8));
         card.setBorder(new EmptyBorder(10, 16, 10, 16));
-        card.setPreferredSize(new Dimension(0, 240));
-        card.setMinimumSize(new Dimension(0, 220));
+        card.setMinimumSize(new Dimension(0, 300));
 
         var heading = buildSectionHeading(
                 SectionGlyph.Kind.CONFIGURATION,
                 "EXECUTION CONFIGURATION",
                 "Configure the coding agent, workspace, and verification target.");
 
-        var controls = new JPanel(new GridBagLayout());
+        var controls = new JPanel();
         controls.setOpaque(false);
-        var constraints = new GridBagConstraints();
-        constraints.anchor = GridBagConstraints.WEST;
+        controls.setLayout(new javax.swing.BoxLayout(controls, javax.swing.BoxLayout.Y_AXIS));
 
+        var projectRow = new JPanel(new BorderLayout(12, 0));
+        projectRow.setOpaque(false);
         var projectLabel = label("PROJECT / WORKSPACE", SMALL_FONT, MUTED);
-        constraints.gridx = 0;
-        constraints.gridy = 0;
-        constraints.gridwidth = 1;
-        constraints.fill = GridBagConstraints.NONE;
-        constraints.weightx = 0;
-        constraints.insets = new Insets(0, 0, 0, 12);
-        controls.add(projectLabel, constraints);
+        projectLabel.setPreferredSize(new Dimension(142, projectLabel.getPreferredSize().height));
+        projectRow.add(projectLabel, BorderLayout.WEST);
 
         var workspaceInput = new JPanel(new BorderLayout(10, 0));
         workspaceInput.setOpaque(false);
         workspaceInput.add(browseButton, BorderLayout.WEST);
         workspaceInput.add(projectField, BorderLayout.CENTER);
-        projectField.setColumns(36);
-        constraints.gridx = 1;
-        constraints.gridwidth = 3;
-        constraints.fill = GridBagConstraints.HORIZONTAL;
-        constraints.weightx = 1;
-        constraints.insets = new Insets(0, 0, 0, 0);
-        controls.add(workspaceInput, constraints);
-        constraints.gridx = 4;
-        constraints.gridwidth = 1;
-        constraints.anchor = GridBagConstraints.EAST;
-        constraints.fill = GridBagConstraints.NONE;
-        constraints.weightx = 0;
-        constraints.insets = new Insets(0, 0, 0, 0);
-        controls.add(historyButton, constraints);
+        projectField.setColumns(28);
+        projectRow.add(workspaceInput, BorderLayout.CENTER);
+        var projectActions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
+        projectActions.setOpaque(false);
+        projectActions.add(gitButton);
+        projectActions.add(historyButton);
+        projectRow.add(projectActions, BorderLayout.EAST);
+        controls.add(projectRow);
 
-        var targetDetails = new JPanel(new GridBagLayout());
-        targetDetails.setOpaque(false);
+        controls.add(javax.swing.Box.createVerticalStrut(8));
+
+        var targetDetails = new JPanel(new GridLayout(1, 2, 16, 0));
+        targetDetails.setOpaque(true);
+        targetDetails.setBackground(SURFACE_RAISED);
         targetDetails.setBorder(new CompoundBorder(
                 new LineBorder(new Color(38, 68, 78), 1, true),
-                new EmptyBorder(4, 12, 4, 12)));
-        var targetConstraints = new GridBagConstraints();
-        targetConstraints.anchor = GridBagConstraints.WEST;
-        targetConstraints.fill = GridBagConstraints.HORIZONTAL;
-        targetConstraints.weightx = 1;
-        targetConstraints.insets = new Insets(0, 24, 0, 0);
-        targetDetails.add(targetCard("WORKSPACE", workspaceTargetLabel, SectionGlyph.Kind.WORKSPACE),
-                targetConstraints);
+                new EmptyBorder(8, 12, 8, 12)));
         workspaceTargetLabel.setBorder(new EmptyBorder(1, 0, 1, 0));
-        targetConstraints.gridx = 1;
-        targetConstraints.insets = new Insets(0, 0, 0, 0);
-        targetDetails.add(targetCard("VERIFICATION TARGET", verificationTargetLabel, SectionGlyph.Kind.TARGET),
-                targetConstraints);
-        constraints.gridx = 0;
-        constraints.gridy = 1;
-        constraints.gridwidth = 5;
-        constraints.fill = GridBagConstraints.HORIZONTAL;
-        constraints.weightx = 1;
-        constraints.insets = new Insets(4, 0, 0, 0);
-        controls.add(targetDetails, constraints);
+        targetDetails.add(targetCard("WORKSPACE IDENTITY", workspaceTargetLabel,
+                SectionGlyph.Kind.WORKSPACE));
 
+        var targetPanel = new JPanel(new BorderLayout(0, 6));
+        targetPanel.setOpaque(false);
+        targetPanel.add(targetCard("EXISTING SYSTEM / INVESTIGATION TARGET",
+                verificationTargetLabel, SectionGlyph.Kind.TARGET), BorderLayout.CENTER);
+        var targetSelection = new JPanel(new BorderLayout());
+        targetSelection.setOpaque(false);
+        styleSecondaryButton(targetSelector);
+        targetSelector.setToolTipText("Select the investigation target");
+        targetSelection.add(targetSelector, BorderLayout.CENTER);
+        targetSelection.setPreferredSize(new Dimension(190, 0));
+        targetPanel.add(targetSelection, BorderLayout.EAST);
+        targetDetails.add(targetPanel);
+        controls.add(targetDetails);
+
+        controls.add(javax.swing.Box.createVerticalStrut(8));
+
+        var sourceRow = targetCard("SOURCE CONTROL", sourceControlLabel, SectionGlyph.Kind.TARGET);
+        sourceRow.setOpaque(true);
+        sourceRow.setBackground(SURFACE_RAISED);
+        sourceRow.setBorder(new CompoundBorder(
+                new LineBorder(new Color(38, 68, 78), 1, true),
+                new EmptyBorder(8, 12, 8, 12)));
+        controls.add(sourceRow);
+
+        controls.add(javax.swing.Box.createVerticalStrut(8));
+
+        var agentModelRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 16, 0));
+        agentModelRow.setOpaque(false);
         var agentTitle = label("CODING AGENT", SECTION_FONT, ACCENT);
-        constraints.gridx = 0;
-        constraints.gridy = 2;
-        constraints.gridwidth = 1;
-        constraints.anchor = GridBagConstraints.WEST;
-        constraints.fill = GridBagConstraints.NONE;
-        constraints.weightx = 0;
-        constraints.insets = new Insets(4, 0, 0, 12);
-        controls.add(agentTitle, constraints);
-        constraints.gridx = 1;
-        constraints.fill = GridBagConstraints.HORIZONTAL;
-        constraints.weightx = 1;
-        constraints.insets = new Insets(4, 0, 0, 24);
-        controls.add(codingAgent, constraints);
-
+        var agentField = new JPanel(new BorderLayout(8, 0));
+        agentField.setOpaque(false);
+        agentField.add(agentTitle, BorderLayout.WEST);
+        agentField.add(codingAgent, BorderLayout.CENTER);
+        agentModelRow.add(agentField);
         var modelTitle = label("MODEL", SECTION_FONT, ACCENT);
-        constraints.gridx = 2;
-        constraints.fill = GridBagConstraints.NONE;
-        constraints.weightx = 0;
-        constraints.insets = new Insets(4, 0, 0, 12);
-        controls.add(modelTitle, constraints);
-        constraints.gridx = 3;
-        constraints.fill = GridBagConstraints.HORIZONTAL;
-        constraints.weightx = 1;
-        constraints.insets = new Insets(4, 0, 0, 0);
-        controls.add(model, constraints);
+        var modelField = new JPanel(new BorderLayout(8, 0));
+        modelField.setOpaque(false);
+        modelField.add(modelTitle, BorderLayout.WEST);
+        modelField.add(model, BorderLayout.CENTER);
+        agentModelRow.add(modelField);
+        controls.add(agentModelRow);
 
         var agentDescription = label(
                 "EngineOS sends the request to the selected agent, then runs observation.",
                 SMALL_FONT, MUTED);
-        constraints.gridx = 0;
-        constraints.gridy = 3;
-        constraints.gridwidth = 5;
-        constraints.anchor = GridBagConstraints.WEST;
-        constraints.fill = GridBagConstraints.HORIZONTAL;
-        constraints.weightx = 1;
-        constraints.insets = new Insets(4, 0, 0, 0);
-        controls.add(agentDescription, constraints);
+        controls.add(agentDescription);
 
         card.add(heading, BorderLayout.NORTH);
         card.add(controls, BorderLayout.CENTER);
@@ -616,6 +699,38 @@ public final class ObservationWindow {
         return heading;
     }
 
+    private JPanel buildPreflightPanel() {
+        preflightExpanded = false;
+        preflightPanel.setOpaque(true);
+        preflightPanel.setBackground(SURFACE_RAISED);
+        preflightPanel.setBorder(new CompoundBorder(
+                new LineBorder(BORDER, 1, true),
+                new EmptyBorder(8, 12, 8, 12)));
+        var header = new JPanel(new BorderLayout(8, 0));
+        header.setOpaque(false);
+        header.add(label("PRE-FLIGHT", SECTION_FONT, TEXT), BorderLayout.WEST);
+        preflightSummaryLabel.setFont(SMALL_FONT);
+        preflightSummaryLabel.setForeground(MUTED);
+        header.add(preflightSummaryLabel, BorderLayout.CENTER);
+        styleSecondaryButton(preflightToggle);
+        preflightToggle.addActionListener(event -> {
+            preflightExpanded = !preflightExpanded;
+            preflightLabel.setVisible(preflightExpanded);
+            preflightToggle.setText(preflightExpanded ? "COLLAPSE \u25B4" : "EXPAND \u25BE");
+            preflightPanel.revalidate();
+            preflightPanel.repaint();
+        });
+        header.add(preflightToggle, BorderLayout.EAST);
+        preflightPanel.add(header, BorderLayout.NORTH);
+        preflightLabel.setFont(new Font("Segoe UI", Font.PLAIN, 11));
+        preflightLabel.setForeground(TEXT);
+        preflightLabel.setVerticalAlignment(JLabel.TOP);
+        preflightLabel.setText("<html><font color='#94A3B8'>Preparing pre-flight state...</font></html>");
+        preflightLabel.setVisible(false);
+        preflightPanel.add(preflightLabel, BorderLayout.CENTER);
+        return preflightPanel;
+    }
+
     private static JPanel statusRow(String label, JLabel value) {
         return statusRow(label, value, 0);
     }
@@ -653,7 +768,7 @@ public final class ObservationWindow {
         onboardingPanel.setBackground(SURFACE_RAISED);
         onboardingPanel.setBorder(new CompoundBorder(
                 new LineBorder(new Color(61, 82, 116), 1, true),
-                new EmptyBorder(18, 20, 18, 20)));
+                new EmptyBorder(8, 12, 8, 12)));
 
         var explanation = new JTextArea("""
                 EngineOS works with an AI Engineering Partner such as ChatGPT,
@@ -677,11 +792,13 @@ public final class ObservationWindow {
         explanation.setFont(BODY_FONT);
         explanation.setForeground(MUTED);
 
-        var onboardingHeading = new JPanel(new BorderLayout(0, 5));
+        var onboardingHeading = new JPanel(new BorderLayout(8, 0));
         onboardingHeading.setOpaque(false);
-        onboardingHeading.add(label("CHOOSE YOUR ENGINEERING PARTNER", SECTION_FONT, TEXT),
-                BorderLayout.NORTH);
-        onboardingHeading.add(explanation, BorderLayout.CENTER);
+        var setupButton = new JButton("ENGINEERING PARTNER SETUP");
+        styleSecondaryButton(setupButton);
+        onboardingHeading.add(label("ENGINEERING PARTNER SETUP", SECTION_FONT, TEXT),
+                BorderLayout.WEST);
+        onboardingHeading.add(setupButton, BorderLayout.EAST);
 
         var instructions = new JTextArea(8, 60);
         instructions.setText(EngineeringPartnerInstructions.TEXT);
@@ -704,7 +821,17 @@ public final class ObservationWindow {
         instructionsPanel.add(copyButton, BorderLayout.SOUTH);
 
         onboardingPanel.add(onboardingHeading, BorderLayout.NORTH);
-        onboardingPanel.add(instructionsPanel, BorderLayout.CENTER);
+        var details = new JPanel(new BorderLayout(0, 8));
+        details.setOpaque(false);
+        details.add(explanation, BorderLayout.NORTH);
+        details.add(instructionsPanel, BorderLayout.CENTER);
+        details.setVisible(false);
+        setupButton.addActionListener(event -> {
+            details.setVisible(!details.isVisible());
+            onboardingPanel.revalidate();
+            onboardingPanel.repaint();
+        });
+        onboardingPanel.add(details, BorderLayout.CENTER);
         onboardingPanel.setVisible(!isValidWorkspace());
     }
 
@@ -735,6 +862,8 @@ public final class ObservationWindow {
         requestValidation.setForeground(valid ? SUCCESS : MUTED);
         requestValidation.setFont(SMALL_FONT);
         updateActionControls(valid);
+        renderSourceControl();
+        renderPreflight();
         startButton.setBackground(valid ? ACCENT : SURFACE_RAISED);
         startButton.setForeground(valid ? Color.WHITE : MUTED);
         startButton.setBorder(new CompoundBorder(
@@ -767,15 +896,251 @@ public final class ObservationWindow {
     private void updateWorkspaceState() {
         boolean valid = isValidWorkspace();
         historyButton.setEnabled(valid);
+        gitButton.setEnabled(valid);
         onboardingPanel.setVisible(!valid);
         onboardingPanel.getParent().revalidate();
         onboardingPanel.getParent().repaint();
+        refreshSourceControl();
+        updateVerificationPlan();
+    }
+
+    private void refreshSourceControl() {
+        if (sessions == null || serviceError != null) {
+            currentGitSnapshot = null;
+            currentGitWorkspace = null;
+            sourceControlLabel.setText("<html><font color='#94A3B8'>Unavailable until the service is connected.</font></html>");
+            return;
+        }
+        String value = projectField.getText().trim();
+        Path workspace;
+        try {
+            workspace = Path.of(value).toAbsolutePath().normalize();
+        } catch (RuntimeException exception) {
+            currentGitSnapshot = null;
+            currentGitWorkspace = null;
+            sourceControlLabel.setText("<html><font color='#F87171'>Invalid workspace path</font></html>");
+            return;
+        }
+        currentGitWorkspace = workspace;
+        sourceControlLabel.setText("<html><font color='#94A3B8'>Reading Git pre-flight state...</font></html>");
+        new SwingWorker<GitSnapshot, Void>() {
+            @Override
+            protected GitSnapshot doInBackground() {
+                return sessions.sourceControl(workspace);
+            }
+
+            @Override
+            protected void done() {
+                try {
+                    if (!workspace.equals(currentGitWorkspace)) {
+                        return;
+                    }
+                    currentGitSnapshot = get();
+                    renderSourceControl();
+                } catch (Exception exception) {
+                    currentGitSnapshot = GitSnapshot.unavailable(workspace);
+                    sourceControlLabel.setText("<html><font color='#F87171'>Git pre-flight unavailable: "
+                            + escape(exception.getMessage()) + "</font></html>");
+                    renderPreflight();
+                }
+            }
+        }.execute();
+    }
+
+    private void renderSourceControl() {
+        GitSnapshot snapshot = currentGitSnapshot;
+        if (snapshot == null) {
+            return;
+        }
+        if (!snapshot.repository()) {
+            sourceControlLabel.setToolTipText(null);
+            sourceControlLabel.setText("<html><font color='#FBBF24'><b>No Git repository detected</b></font>"
+                    + "<br><font color='#94A3B8'>This is valid; EngineOS will continue without Git baseline evidence.</font></html>");
+            renderPreflight();
+            return;
+        }
+        Path workspace = currentGitWorkspace;
+        sourceControlLabel.setToolTipText(snapshot.repositoryRoot().toString());
+        boolean workspaceRepository = workspace != null
+                && snapshot.repositoryRoot().toString().equalsIgnoreCase(workspace.toString());
+        String scope = workspaceRepository ? "Workspace repository" : "Parent repository";
+        String shortSha = snapshot.headSha().isBlank()
+                ? "unavailable"
+                : snapshot.headSha().substring(0, Math.min(7, snapshot.headSha().length()));
+        String state = snapshot.clean() ? "CLEAN" : "CHANGED";
+        String color = snapshot.clean() ? "#45D483" : "#FBBF24";
+        String indicator = snapshot.clean() ? "\u2713 READY" : "\u26A0 Existing changes detected";
+        String implications = requestImplication(snapshot.clean());
+        String changes = snapshot.clean() ? "" : "<br>" + snapshot.changes().size()
+                + " files modified &nbsp; +" + snapshot.linesAdded() + " / -" + snapshot.linesRemoved();
+        sourceControlLabel.setText("<html><b>Git</b> &bull; " + escape(snapshot.branch())
+                + " &bull; " + shortSha + " &nbsp; <font color='" + color + "'><b>"
+                + state + " &nbsp; " + indicator + "</b></font>"
+                + changes + "<br><font color='#94A3B8'>Repository: "
+                + escape(compactPath(snapshot.repositoryRoot().toString(), 72)) + " &nbsp; Scope: " + scope
+                + "</font><br><font color='" + color + "'>" + implications + "</font></html>");
+        renderPreflight();
+    }
+
+    private String requestImplication(boolean clean) {
+        String request = promptArea.getText().toLowerCase();
+        String kind = request.contains("investigat") || request.contains("understand")
+                ? "investigation" : request.contains("verif")
+                ? "verification" : "implementation";
+        return clean
+                ? "\u2713 Good baseline for " + kind
+                : "\u26A0 Existing changes will be present during " + kind;
+    }
+
+    private void renderPreflight() {
+        if (sessions == null || serviceError != null) {
+            preflightLabel.setText(preflightHtml(
+                    "\uD83D\uDD34 NOT READY", ERROR,
+                    "AGENT", "\u26A0 EngineOS Service unavailable"));
+            setPreflightSummary("\uD83D\uDD34 NOT READY", "Service unavailable", ERROR);
+            return;
+        }
+        String project = projectField.getText().trim();
+        Path workspace;
+        try {
+            workspace = project.isBlank() ? null : Path.of(project);
+        } catch (RuntimeException exception) {
+            preflightLabel.setText(preflightHtml(
+                    "\uD83D\uDD34 NOT READY", ERROR,
+                    "TARGET", "\u26A0 Invalid workspace path"));
+            setPreflightSummary("\uD83D\uDD34 NOT READY", "Invalid workspace", ERROR);
+            return;
+        }
+        boolean requestValid = EngineeringRequestValidator.isValid(promptArea.getText());
+        boolean workspaceValid = workspace != null && isValidWorkspace();
+        String request = promptArea.getText().trim();
+        String requestKind = request.toLowerCase().contains("investigat")
+                || request.toLowerCase().contains("understand")
+                ? "Investigation"
+                : request.toLowerCase().contains("verif") ? "Verification" : "Code Change";
+        var plan = workspaceValid ? sessions.verificationPlan(workspace, request) : null;
+        boolean verificationAvailable = plan != null && plan.resolved() && plan.targetKind() != null;
+        boolean sourceLoaded = currentGitSnapshot != null
+                && workspace.equals(currentGitWorkspace);
+        boolean ready = workspaceValid && requestValid && verificationAvailable
+                && sourceLoaded && codingAgent.getSelectedItem() != null
+                && model.getSelectedItem() != null;
+        boolean review = ready && !currentGitSnapshot.clean();
+        String overall = review ? "\uD83D\uDFE1 REVIEW" : ready ? "\uD83D\uDFE2 READY" : "\uD83D\uDD34 NOT READY";
+        Color overallColor = review ? ACTIVE_AMBER : ready ? SUCCESS : ERROR;
+        String overallSummary = review ? "Existing changes detected"
+                : ready ? "Ready to submit" : "Required state unavailable";
+
+        String targetName = workspace == null || project.isBlank()
+                ? "Unavailable"
+                : workspace.getFileName() == null ? workspace.toString() : workspace.getFileName().toString();
+        String target = requestValid && workspaceValid
+                ? "\u2713 " + targetName + "<br><font color='#94A3B8'>" + escape(project) + "</font>"
+                : "\u26A0 Required workspace/request unavailable";
+
+        String source;
+        if (!sourceLoaded) {
+            source = "\u26A0 Reading Git state...";
+        } else if (!currentGitSnapshot.repository()) {
+            source = "\u26A0 No Git repository detected";
+        } else {
+            String scope = currentGitSnapshot.repositoryRoot().toString()
+                    .equalsIgnoreCase(workspace.toAbsolutePath().normalize().toString())
+                    ? "Workspace repository" : "Parent repository";
+            String sha = currentGitSnapshot.headSha().isBlank()
+                    ? "unavailable"
+                    : currentGitSnapshot.headSha().substring(0,
+                    Math.min(7, currentGitSnapshot.headSha().length()));
+            source = (currentGitSnapshot.clean() ? "\u2713" : "\u26A0")
+                    + " Git &bull; " + escape(currentGitSnapshot.repositoryRoot().toString())
+                    + "<br>&nbsp;&nbsp;Scope: " + scope
+                    + " &nbsp; Branch: " + escape(currentGitSnapshot.branch())
+                    + " &nbsp; HEAD: " + sha
+                    + "<br>&nbsp;&nbsp;Working tree: <b>"
+                    + (currentGitSnapshot.clean() ? "CLEAN" : "CHANGED") + "</b>"
+                    + (currentGitSnapshot.clean() ? "" : " &nbsp; "
+                    + currentGitSnapshot.changes().size() + " files &nbsp; +"
+                    + currentGitSnapshot.linesAdded() + " / -"
+                    + currentGitSnapshot.linesRemoved());
+        }
+
+        String agent = codingAgent.getSelectedItem() == null
+                ? "\u26A0 Coding Agent unavailable"
+                : "\u2713 " + escape(String.valueOf(codingAgent.getSelectedItem()))
+                + " &nbsp; Model: " + escape(String.valueOf(model.getSelectedItem()));
+        String verification = plan == null || !plan.resolved()
+                ? "\u26A0 Verification configuration unavailable"
+                : verificationAvailable
+                ? "\u2713 Available &nbsp; Target: " + escape(plan.targetKind().name())
+                : "\u26A0 Limited &nbsp; No separate behavioral verification target";
+        String reviewNote = review
+                ? "<br><font color='#FBBF24'>Existing changes detected before this request.</font>" : "";
+        preflightLabel.setText("<html><font color='" + colorHex(overallColor)
+                + "'><b>" + overall + "</b></font>"
+                + "<br><b>TARGET</b> " + target
+                + "<br><b>SOURCE CONTROL</b> " + source + reviewNote
+                + "<br><b>AGENT</b> " + agent
+                + "<br><b>REQUEST</b> <font color='#94A3B8'>"
+                + escape(requestKind) + "</font> &nbsp; " + (requestValid ? "\u2713" : "\u26A0")
+                + " " + escape(compact(request))
+                + "<br><b>VERIFICATION</b> " + verification + "</html>");
+        setPreflightSummary(overall, overallSummary, overallColor);
+    }
+
+    private void setPreflightSummary(String overall, String summary, Color color) {
+        preflightSummaryLabel.setText("<html><font color='" + colorHex(color)
+                + "'><b>" + overall + "</b></font> &nbsp; " + escape(summary) + "</html>");
+    }
+
+    private static String preflightHtml(String overall, Color color, String section, String detail) {
+        return "<html><font color='" + colorHex(color) + "'><b>" + overall + "</b></font>"
+                + "<br><br><b>" + section + "</b><br>" + detail + "</html>";
+    }
+
+    private static String compact(String value) {
+        String normalized = value == null ? "" : value.replaceAll("\\s+", " ").trim();
+        return normalized.length() > 120 ? normalized.substring(0, 117) + "..." : normalized;
+    }
+
+    private static String colorHex(Color color) {
+        return String.format("#%02X%02X%02X", color.getRed(), color.getGreen(), color.getBlue());
+    }
+
+    private void recoverPersistedObservation() {
+        if (!isValidWorkspace()) {
+            return;
+        }
+        var recovered = packages.findLatestCompleted().orElse(null);
+        if (recovered == null || recovered.runId() == null) {
+            return;
+        }
+        var record = findHistoryRecord(recovered.runId());
+        if (record == null || record.workspace() == null
+                || !Path.of(record.workspace()).toAbsolutePath().normalize()
+                .equals(Path.of(projectField.getText().trim()).toAbsolutePath().normalize())) {
+            return;
+        }
+        currentObservation = recovered;
+        currentRunId = recovered.runId();
+        currentHistoryRecord = record;
+        requestLifecycle.serviceState(EngineOsService.ExecutionState.GREEN);
+        requestStatus.setText(requestLifecycle.displayText());
+        requestStatus.setForeground(SUCCESS);
+        resultStatus.setText("Engineering Result available for the current request.");
+        resultStatus.setForeground(SUCCESS);
+        resultArea.setText(HistoryPresentation.format(record));
+        resultArea.setCaretPosition(0);
+        resultPanel.setVisible(true);
+        observationStatus.setText("Observation ready for current request.");
+        observationStatus.setForeground(SUCCESS);
+        refreshObservationClipboardState();
     }
 
     private void updateVerificationPlan() {
         if (sessions == null || serviceError != null) {
             workspaceTargetLabel.setText("");
             verificationTargetLabel.setText("");
+            targetSelector.setEnabled(false);
             return;
         }
         String project = projectField.getText().trim();
@@ -787,22 +1152,36 @@ public final class ObservationWindow {
                     + escape(project) + "</html>");
             verificationTargetLabel.setText("<html><font color='#F87171'>VERIFICATION TARGET</font><br>"
                     + "Invalid workspace path</html>");
+            targetSelector.setEnabled(false);
             return;
         }
         var plan = sessions.verificationPlan(projectPath, promptArea.getText());
         if (!plan.resolved()) {
             workspaceTargetLabel.setText("<html><font color='#94A3B8'>" + escape(project) + "</font></html>");
             verificationTargetLabel.setText("<html><font color='#F87171'>" + escape(plan.error()) + "</font></html>");
+            targetSelector.setEnabled(false);
             return;
+        }
+        targetSelector.setEnabled(plan.targetKind() != null);
+        updatingTargetSelector = true;
+        try {
+            targetSelector.setSelectedItem(plan.explicitTarget()
+                    ? plan.targetKind().name() : "WORKSPACE DEFAULT");
+        } finally {
+            updatingTargetSelector = false;
         }
         if (plan.targetKind() == null) {
             workspaceTargetLabel.setText("<html><font color='#94A3B8'>" + escape(project) + "</font></html>");
-            verificationTargetLabel.setText("<html><font color='#FBBF24'>No supported target resolved</font></html>");
+            verificationTargetLabel.setText("<html><font color='#FBBF24'>Repository investigation target</font></html>");
             return;
         }
         String workspaceKind = plan.workspaceKind().name();
         String targetKind = plan.targetKind().name();
-        workspaceTargetLabel.setText(workspaceValue(workspaceKind, plan.workspaceRoot().toString()));
+        String workspacePath = plan.workspaceRoot().toString();
+        workspaceTargetLabel.setToolTipText(workspacePath);
+        String workspaceName = plan.workspaceRoot().getFileName() == null
+                ? workspacePath : plan.workspaceRoot().getFileName().toString();
+        workspaceTargetLabel.setText(workspaceValue(workspaceKind, workspaceName));
         String targetSuffix = plan.explicitTarget()
                 ? ""
                 : " (workspace default)";
@@ -844,6 +1223,14 @@ public final class ObservationWindow {
                 + escape(path) + "</font></html>";
     }
 
+    private static String compactPath(String path, int maxLength) {
+        if (path == null || path.length() <= maxLength) {
+            return path;
+        }
+        int tailLength = Math.max(12, maxLength - 3);
+        return "..." + path.substring(path.length() - tailLength);
+    }
+
     private static JPanel targetCard(String title, JLabel value, SectionGlyph.Kind kind) {
         var panel = new JPanel(new BorderLayout(10, 0));
         panel.setOpaque(false);
@@ -856,6 +1243,26 @@ public final class ObservationWindow {
         panel.add(text, BorderLayout.CENTER);
         value.setForeground(TEXT);
         return panel;
+    }
+
+    private void applyTargetSelection() {
+        String selection = (String) targetSelector.getSelectedItem();
+        if (selection == null || selection.equals("WORKSPACE DEFAULT")) {
+            promptArea.setText(promptWithoutVerificationTarget(promptArea.getText()));
+            return;
+        }
+        String request = promptWithoutVerificationTarget(promptArea.getText()).trim();
+        promptArea.setText(request + (request.isBlank() ? "" : System.lineSeparator())
+                + "Verification Target: " + selection);
+    }
+
+    private static String promptWithoutVerificationTarget(String prompt) {
+        if (prompt == null) {
+            return "";
+        }
+        return prompt.replaceAll("(?im)^\\s*Verification\\s+Target\\s*:\\s*\\S.*(?:\\R|$)", "")
+                .replaceAll("(?m)\\n{3,}", "\n\n")
+                .trim();
     }
 
     private static String escape(String value) {
@@ -872,8 +1279,27 @@ public final class ObservationWindow {
             return;
         }
         DesktopDiagnostics.stage("startSession");
+        if (currentGitSnapshot != null && !currentGitSnapshot.clean()) {
+            int choice = JOptionPane.showConfirmDialog(
+                    frame,
+                    "Existing changes are present in the selected workspace.\n"
+                            + "EngineOS will preserve them and include them in the pre-flight baseline.\n\n"
+                            + "Continue with this request?",
+                    "Review Existing Changes",
+                    JOptionPane.OK_CANCEL_OPTION,
+                    JOptionPane.WARNING_MESSAGE);
+            if (choice != JOptionPane.OK_OPTION) {
+                return;
+            }
+        }
+        long generation = ++requestGeneration;
         String project = projectField.getText().trim();
         String prompt = promptArea.getText().trim();
+        Path submissionWorkspace = Path.of(project).toAbsolutePath().normalize();
+        GitSnapshot preflightBaseline = submissionWorkspace.equals(currentGitWorkspace)
+                && currentGitSnapshot != null
+                ? currentGitSnapshot
+                : sessions.sourceControl(submissionWorkspace);
         startButton.setEnabled(false);
         cancelButton.setEnabled(true);
         sendButton.setEnabled(false);
@@ -893,6 +1319,7 @@ public final class ObservationWindow {
         setActivityActive(true);
         resultStatus.setText("No Engineering Result available for the current request.");
         resultStatus.setForeground(MUTED);
+        resultPanel.setVisible(false);
         requestLifecycle.submitted();
         activityArea.setText("\u2022 " + ENGINEOS_STARTUP_ACTIVITY);
         activityArea.setCaretPosition(activityArea.getDocument().getLength());
@@ -908,11 +1335,15 @@ public final class ObservationWindow {
                         Path.of(project),
                         prompt,
                         (String) model.getSelectedItem(),
+                        preflightBaseline,
                         this::publish,
                         activity -> SwingUtilities.invokeLater(() -> appendActivity(activity)));
             }
             @Override
             protected void process(java.util.List<EngineOsService.ExecutionState> states) {
+                if (generation != requestGeneration) {
+                    return;
+                }
                 if (!states.isEmpty()) {
                     var state = states.get(states.size() - 1);
                     requestLifecycle.serviceState(state);
@@ -935,6 +1366,9 @@ public final class ObservationWindow {
 
             @Override
             protected void done() {
+                if (generation != requestGeneration) {
+                    return;
+                }
                 DesktopDiagnostics.stage("done-entered");
                 try {
                     var result = get();
@@ -955,6 +1389,11 @@ public final class ObservationWindow {
                             : "No Engineering Result available for the current request.");
                     resultStatus.setForeground(currentResultMatches(currentRunId, currentHistoryRecord)
                             ? SUCCESS : MUTED);
+                    if (currentResultMatches(currentRunId, currentHistoryRecord)) {
+                        resultArea.setText(HistoryPresentation.format(currentHistoryRecord));
+                        resultArea.setCaretPosition(0);
+                        resultPanel.setVisible(true);
+                    }
                     if (result.state() == EngineOsService.ExecutionState.GREEN) {
                         currentObservation = packages.findCompletedForRun(currentRunId).orElse(null);
                         observationStatus.setText(currentObservation == null
@@ -1020,6 +1459,23 @@ public final class ObservationWindow {
         activityArea.setCaretPosition(activityArea.getDocument().getLength());
     }
 
+    private void invalidateCurrentRequestPresentation() {
+        if (requestLifecycle.active()) {
+            return;
+        }
+        requestGeneration++;
+        currentObservation = null;
+        currentRunId = null;
+        currentHistoryRecord = null;
+        resultArea.setText("The Coding Agent observation/result will appear here after submission.");
+        resultPanel.setVisible(false);
+        resultStatus.setText("No Engineering Result available for the current request.");
+        resultStatus.setForeground(MUTED);
+        observationStatus.setText("No observation package available for the current request.");
+        observationStatus.setForeground(MUTED);
+        refreshObservationClipboardState();
+    }
+
     private EngineeringHistoryRecord findHistoryRecord(String runId) {
         if (runId == null || sessions == null) {
             return null;
@@ -1032,6 +1488,7 @@ public final class ObservationWindow {
 
     static boolean currentResultMatches(String runId, EngineeringHistoryRecord record) {
         return runId != null && record != null && runId.equals(record.runId())
+                && "GREEN".equalsIgnoreCase(record.finalStatus())
                 && record.engineeringResult() != null && !record.engineeringResult().isBlank();
     }
 
@@ -1263,9 +1720,207 @@ public final class ObservationWindow {
         return timestamp.toString().replace('T', ' ').replaceFirst("\\.\\d+Z$", "Z");
     }
 
+    private void showGitStatus() {
+        Path workspace;
+        try {
+            workspace = Path.of(projectField.getText().trim());
+        } catch (RuntimeException exception) {
+            return;
+        }
+        gitButton.setEnabled(false);
+        new SwingWorker<String, Void>() {
+            @Override
+            protected String doInBackground() {
+                return gitStatusText(workspace);
+            }
+
+            @Override
+            protected void done() {
+                gitButton.setEnabled(isValidWorkspace());
+                try {
+                    var details = new JTextArea(get());
+                    details.setEditable(false);
+                    details.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+                    details.setForeground(TEXT);
+                    details.setBackground(SURFACE);
+                    details.setBorder(new EmptyBorder(14, 14, 14, 14));
+                    var commitMessage = new JTextField();
+                    styleTextField(commitMessage);
+                    if (currentHistoryRecord != null) {
+                        commitMessage.setText(commitMessageFor(currentHistoryRecord));
+                    }
+                    var commitButton = new JButton("COMMIT STAGED");
+                    stylePrimaryButton(commitButton);
+                    commitButton.setEnabled(false);
+                    var feedback = label("", SMALL_FONT, MUTED);
+                    commitMessage.getDocument().addDocumentListener(new DocumentListener() {
+                        private void update() {
+                            commitButton.setEnabled(!commitMessage.getText().trim().isEmpty());
+                        }
+
+                        @Override
+                        public void insertUpdate(DocumentEvent event) {
+                            update();
+                        }
+
+                        @Override
+                        public void removeUpdate(DocumentEvent event) {
+                            update();
+                        }
+
+                        @Override
+                        public void changedUpdate(DocumentEvent event) {
+                            update();
+                        }
+                    });
+                    var commitPanel = new JPanel(new BorderLayout(8, 0));
+                    commitPanel.setOpaque(false);
+                    commitPanel.setBorder(new EmptyBorder(10, 14, 10, 14));
+                    commitPanel.add(label("COMMIT MESSAGE", SMALL_FONT, MUTED), BorderLayout.WEST);
+                    commitPanel.add(commitMessage, BorderLayout.CENTER);
+                    commitPanel.add(commitButton, BorderLayout.EAST);
+                    var dialog = new JDialog(frame, "Git Status", false);
+                    dialog.setLayout(new BorderLayout());
+                    dialog.getContentPane().setBackground(BACKGROUND);
+                    var scroll = new JScrollPane(details);
+                    styleScrollPane(scroll);
+                    dialog.add(scroll, BorderLayout.CENTER);
+                    var bottom = new JPanel(new BorderLayout(0, 4));
+                    bottom.setOpaque(false);
+                    bottom.add(commitPanel, BorderLayout.NORTH);
+                    bottom.add(feedback, BorderLayout.SOUTH);
+                    bottom.setBorder(new EmptyBorder(0, 0, 10, 0));
+                    dialog.add(bottom, BorderLayout.SOUTH);
+                    commitButton.addActionListener(event -> commitFromGitDialog(
+                            workspace, commitMessage, commitButton, feedback, details));
+                    dialog.setSize(900, 600);
+                    dialog.setMinimumSize(new Dimension(620, 360));
+                    dialog.setLocationRelativeTo(frame);
+                    dialog.setVisible(true);
+                } catch (Exception exception) {
+                    status.setText("Git status unavailable: " + exception.getMessage());
+                    status.setForeground(ERROR);
+                }
+            }
+        }.execute();
+    }
+
+    private void commitFromGitDialog(
+            Path workspace,
+            JTextField commitMessage,
+            JButton commitButton,
+            JLabel feedback,
+            JTextArea details) {
+        String message = commitMessage.getText().trim();
+        if (message.isEmpty()) {
+            commitButton.setEnabled(false);
+            feedback.setText("Commit message is required.");
+            feedback.setForeground(ERROR);
+            return;
+        }
+        commitButton.setEnabled(false);
+        if (JOptionPane.showConfirmDialog(
+                frame,
+                "Commit the staged changes to the local repository?\n\n" + message,
+                "Confirm Git Commit",
+                JOptionPane.YES_NO_OPTION,
+                JOptionPane.WARNING_MESSAGE) != JOptionPane.YES_OPTION) {
+            commitButton.setEnabled(true);
+            return;
+        }
+        feedback.setText("Committing staged changes...");
+        feedback.setForeground(MUTED);
+        new SwingWorker<com.engineos.infrastructure.git.GitCommitResult, Void>() {
+            @Override
+            protected com.engineos.infrastructure.git.GitCommitResult doInBackground() {
+                return sessions == null
+                        ? git.commit(workspace, message)
+                        : sessions.commitWorkspace(workspace, currentRunId, message);
+            }
+
+            @Override
+            protected void done() {
+                try {
+                    var result = get();
+                    if (!result.succeeded()) {
+                        feedback.setText("Commit failed: " + result.error());
+                        feedback.setForeground(ERROR);
+                        commitButton.setEnabled(!commitMessage.getText().trim().isEmpty());
+                        return;
+                    }
+                    feedback.setText("\u2713 Commit created: " + result.commitHash());
+                    feedback.setForeground(SUCCESS);
+                    details.setText(gitStatusText(workspace));
+                    details.setCaretPosition(0);
+                    commitMessage.setText("");
+                    currentHistoryRecord = findHistoryRecord(currentRunId);
+                    if (currentHistoryRecord != null) {
+                        resultArea.setText(HistoryPresentation.format(currentHistoryRecord));
+                        resultArea.setCaretPosition(0);
+                    }
+                } catch (Exception | LinkageError exception) {
+                    Throwable cause = exception.getCause() == null ? exception : exception.getCause();
+                    feedback.setText("Commit failed: " + cause.getMessage());
+                    feedback.setForeground(ERROR);
+                    commitButton.setEnabled(!commitMessage.getText().trim().isEmpty());
+                }
+            }
+        }.execute();
+    }
+
+    private String gitStatusText(Path workspace) {
+        GitStatus status = git.status(workspace);
+        if (!status.repository()) {
+            return "GIT STATUS\n\nThis workspace is not a Git repository.\n"
+                    + (status.error().isBlank() ? "" : "\n" + status.error());
+        }
+        var text = new StringBuilder();
+        text.append("GIT STATUS\n\n")
+                .append("Branch: ").append(status.branch()).append('\n')
+                .append("HEAD: ").append(git.snapshot(workspace).headSha()).append('\n')
+                .append("Working tree: ").append(status.clean() ? "clean" : "changed")
+                .append("\n\n");
+        if (status.changes().isEmpty()) {
+            text.append("No changed files.\n");
+        } else {
+            text.append("CHANGES\n");
+            status.changes().forEach(change -> text.append(change.indexStatus())
+                    .append(change.workTreeStatus()).append(" ")
+                    .append(change.originalPath().isBlank()
+                            ? change.path()
+                            : change.originalPath() + " -> " + change.path())
+                    .append('\n'));
+        }
+        text.append("\nRECENT COMMITS\n");
+        var commits = git.recentCommits(workspace, 5);
+        if (commits.isEmpty()) {
+            text.append("No commits available.\n");
+        } else {
+            commits.forEach(commit -> text.append(commit.shortHash()).append(" ")
+                    .append(commit.message()).append(" — ")
+                    .append(commit.author()).append(" — ")
+                    .append(compactTimestamp(commit.timestamp())).append('\n'));
+        }
+        text.append("\nLOCAL BRANCHES\n");
+        for (GitBranch branch : git.branches(workspace)) {
+            text.append(branch.current() ? "* " : "  ").append(branch.name()).append('\n');
+        }
+        text.append("\nDIFF\n").append(git.workingTreeDiff(workspace).text());
+        return text.toString();
+    }
+
     private static String historyStatus(EngineeringHistoryRecord record) {
         var assessment = com.engineos.history.EngineeringAssessment.from(record);
         return assessment.verificationStatus() + " / " + assessment.implementationStatus();
+    }
+
+    private static String commitMessageFor(EngineeringHistoryRecord record) {
+        String summary = record == null ? "" : record.requestSummary();
+        if (summary == null || summary.isBlank()) {
+            summary = record == null ? "EngineOS engineering change" : record.displaySummary();
+        }
+        summary = summary.replaceAll("\\s+", " ").trim();
+        return summary.length() > 72 ? summary.substring(0, 69) + "..." : summary;
     }
 
     private static boolean hasEngineeringResult(EngineeringHistoryRecord record) {
@@ -1373,7 +2028,7 @@ public final class ObservationWindow {
     }
 
     private static final class SectionGlyph extends JComponent {
-        enum Kind { REQUEST, CONFIGURATION, WORKSPACE, TARGET }
+        enum Kind { REQUEST, CONFIGURATION, WORKSPACE, TARGET, OBSERVATION }
 
         private final Kind kind;
 
@@ -1450,6 +2105,39 @@ public final class ObservationWindow {
         panel.setBackground(SURFACE);
         panel.setBorder(new EmptyBorder(14, 16, 14, 16));
         return panel;
+    }
+
+    private static final class ScrollablePanel extends JPanel implements javax.swing.Scrollable {
+        ScrollablePanel(java.awt.LayoutManager layout) {
+            super(layout);
+        }
+
+        @Override
+        public Dimension getPreferredScrollableViewportSize() {
+            return getPreferredSize();
+        }
+
+        @Override
+        public int getScrollableUnitIncrement(
+                java.awt.Rectangle visibleRect, int orientation, int direction) {
+            return 24;
+        }
+
+        @Override
+        public int getScrollableBlockIncrement(
+                java.awt.Rectangle visibleRect, int orientation, int direction) {
+            return Math.max(visibleRect.height - 24, 24);
+        }
+
+        @Override
+        public boolean getScrollableTracksViewportWidth() {
+            return true;
+        }
+
+        @Override
+        public boolean getScrollableTracksViewportHeight() {
+            return false;
+        }
     }
 
     private static JLabel label(String text, Font font, Color color) {

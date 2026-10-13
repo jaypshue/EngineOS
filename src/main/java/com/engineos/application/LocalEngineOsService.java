@@ -6,6 +6,7 @@ import com.engineos.history.EngineeringHistoryRecord;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.function.Consumer;
+import com.engineos.infrastructure.git.GitSnapshot;
 
 /**
  * In-process EngineOS service implementation used by the desktop client.
@@ -29,6 +30,11 @@ public final class LocalEngineOsService implements EngineOsService {
     @Override
     public AgentProvider codingAgentProvider() {
         return runner.codingAgentProvider();
+    }
+
+    @Override
+    public GitSnapshot sourceControl(Path project) {
+        return runner.sourceControl(project);
     }
 
     @Override
@@ -69,6 +75,26 @@ public final class LocalEngineOsService implements EngineOsService {
     }
 
     @Override
+    public ExecutionResult submit(
+            Path project,
+            String prompt,
+            String selectedModel,
+            GitSnapshot sourceControlBaseline,
+            Consumer<ExecutionState> stateSink,
+            Consumer<String> activitySink) {
+        var result = runner.run(project, prompt, selectedModel, sourceControlBaseline,
+                state -> stateSink.accept(ExecutionState.valueOf(state.name())),
+                activitySink);
+        return new ExecutionResult(
+                ExecutionState.valueOf(result.state().name()),
+                result.detail(),
+                result.coding(),
+                result.observation(),
+                result.activity(),
+                result.engineeringResult());
+    }
+
+    @Override
     public boolean cancelActive() {
         return runner.cancelActive();
     }
@@ -76,5 +102,11 @@ public final class LocalEngineOsService implements EngineOsService {
     @Override
     public boolean showActiveVerificationTarget() {
         return runner.showActiveVerificationTarget();
+    }
+
+    @Override
+    public com.engineos.infrastructure.git.GitCommitResult commitWorkspace(
+            Path project, String runId, String message) {
+        return runner.commit(project, runId, message);
     }
 }

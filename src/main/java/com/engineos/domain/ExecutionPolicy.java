@@ -25,7 +25,8 @@ public record ExecutionPolicy(
         return new ExecutionPolicy(
                 phase,
                 configuredDuration(prefix + ".max-duration-seconds",
-                        phase == ExecutionPhase.VERIFICATION ? 120 : 600),
+                        phase == ExecutionPhase.VERIFICATION ? 120
+                                : phase == ExecutionPhase.INVESTIGATION ? 600 : 600),
                 configuredInt("engineos.execution.max-correction-attempts", 1),
                 phase == ExecutionPhase.IMPLEMENTATION,
                 true);
@@ -34,11 +35,18 @@ public record ExecutionPolicy(
     public static ExecutionPolicy forRequest(EngineeringRequest request) {
         String source = (request == null ? "" : request.raw()).toLowerCase();
         String normalizedSource = source.replace('-', ' ');
-        boolean verificationOnly = normalizedSource.contains("verification only")
+        boolean investigation = (source.contains("investigate")
+                || source.contains("existing system")
+                || source.contains("existing repository"))
+                && (source.contains("do not change")
+                || source.contains("do not modify")
+                || source.contains("without changing"));
+        boolean verificationOnly = !investigation && (normalizedSource.contains("verification only")
                 || source.contains("do not change source")
                 || source.contains("do not modify source")
-                || source.contains("without changing source files");
-        return defaults(verificationOnly ? ExecutionPhase.VERIFICATION : ExecutionPhase.IMPLEMENTATION);
+                || source.contains("without changing source files"));
+        return defaults(investigation ? ExecutionPhase.INVESTIGATION
+                : verificationOnly ? ExecutionPhase.VERIFICATION : ExecutionPhase.IMPLEMENTATION);
     }
 
     private static Duration configuredDuration(String key, long fallbackSeconds) {

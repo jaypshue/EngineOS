@@ -35,8 +35,8 @@ class DesktopRequestLifecycleTest {
         lifecycle.serviceState(EngineOsService.ExecutionState.FAILED);
 
         assertEquals(DesktopRequestLifecycle.State.FAILED, lifecycle.state());
-        assertTrue(lifecycle.resultAvailable());
-        assertEquals("Request failed/terminated; Engineering Result available.",
+        assertFalse(lifecycle.resultAvailable());
+        assertEquals("Request failed/terminated.",
                 lifecycle.displayText());
 
         lifecycle.replaceWithRecognizedRequest();
@@ -90,15 +90,15 @@ class DesktopRequestLifecycleTest {
     }
 
     @Test
-    void cancelledRequestExposesItsCompletedResult() {
+    void cancelledRequestDoesNotExposeAnEngineeringResult() {
         var lifecycle = new DesktopRequestLifecycle();
         lifecycle.submitted();
         lifecycle.serviceState(EngineOsService.ExecutionState.CODING_AGENT_WORKING);
         lifecycle.serviceState(EngineOsService.ExecutionState.CANCELLED);
 
         assertEquals(DesktopRequestLifecycle.State.CANCELLED, lifecycle.state());
-        assertTrue(lifecycle.resultAvailable());
-        assertEquals("Request cancelled/terminated; Engineering Result available.",
+        assertFalse(lifecycle.resultAvailable());
+        assertEquals("Request cancelled/terminated.",
                 lifecycle.displayText());
         assertFalse(lifecycle.stopAvailable());
     }

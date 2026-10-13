@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
 import java.util.concurrent.atomic.AtomicReference;
+import com.engineos.infrastructure.git.GitSnapshot;
 
 /**
  * Desktop-side transport client for the local EngineOS HTTP adapter.
@@ -57,15 +58,34 @@ public final class HttpEngineOsService implements EngineOsService {
     }
 
     @Override
+    public GitSnapshot sourceControl(Path project) {
+        return get("/api/engineos/source-control?project="
+                        + encode(project == null ? "" : project.toString()),
+                GitSnapshot.class);
+    }
+
+    @Override
     public ExecutionResult submit(
             Path project,
             String prompt,
             String selectedModel,
             Consumer<ExecutionState> stateSink,
             Consumer<String> activitySink) {
+        return submit(project, prompt, selectedModel, null, stateSink, activitySink);
+    }
+
+    @Override
+    public ExecutionResult submit(
+            Path project,
+            String prompt,
+            String selectedModel,
+            GitSnapshot sourceControlBaseline,
+            Consumer<ExecutionState> stateSink,
+            Consumer<String> activitySink) {
         stateSink.accept(ExecutionState.STARTING);
         var request = new EngineOsHttpServer.SubmitRequest(
-                project == null ? null : project.toString(), prompt, selectedModel);
+                project == null ? null : project.toString(), prompt, selectedModel,
+                sourceControlBaseline);
         try {
             var httpRequest = HttpRequest.newBuilder(uri("/api/engineos/requests"))
                     .header("Content-Type", "application/json")
@@ -144,6 +164,28 @@ public final class HttpEngineOsService implements EngineOsService {
     public boolean showActiveVerificationTarget() {
         return get("/api/engineos/active-target", new TypeReference<Map<String, Boolean>>() {
         }).getOrDefault("active", false);
+    }
+
+    @Override
+    public com.engineos.infrastructure.git.GitCommitResult commitWorkspace(
+            Path project, String runId, String message) {
+        try {
+            var request = new EngineOsHttpServer.CommitRequest(
+                    project == null ? null : project.toString(), runId, message);
+            var response = client.send(HttpRequest.newBuilder(uri("/api/engineos/commit"))
+                            .header("Content-Type", "application/json")
+                            .POST(HttpRequest.BodyPublishers.ofByteArray(mapper.writeValueAsBytes(request)))
+                            .build(),
+                    HttpResponse.BodyHandlers.ofByteArray());
+            ensureSuccess(response);
+            return mapper.readValue(response.body(),
+                    com.engineos.infrastructure.git.GitCommitResult.class);
+        } catch (IOException exception) {
+            throw requestFailure("/api/engineos/commit", exception);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("EngineOS HTTP commit interrupted", exception);
+        }
     }
 
     private <T> T get(String path, Class<T> type) {

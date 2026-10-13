@@ -16,6 +16,8 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
 import java.nio.file.Files;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -138,6 +140,7 @@ class EngineeringSessionHistoryIntegrationTest {
         } catch (Exception exception) {
             throw new AssertionError(exception);
         }
+
         var runner = new EngineeringSessionRunner(
                 new StubCoder(new CodingResult(0, "raw", "", Duration.ZERO)),
                 new StubObservation(new ObservationRunner.ObservationResult(0, "observed", "")));
@@ -146,6 +149,60 @@ class EngineeringSessionHistoryIntegrationTest {
         });
 
         assertTrue(runner.history().list().isEmpty());
+    }
+
+    @Test
+    void persistsGitBaselineAndPostRunStateWithTheEngineeringHistory() throws Exception {
+        Files.writeString(project.resolve("pom.xml"), "<project/>");
+        runGit("init", "-b", "main");
+        runGit("config", "user.name", "EngineOS Test");
+        runGit("config", "user.email", "engineos@example.test");
+        runGit("add", "pom.xml");
+        runGit("commit", "-m", "baseline");
+
+        var history = new FileEngineeringHistoryRepository(project.resolve("history"));
+        var runner = new EngineeringSessionRunner(
+                new StubCoder(new CodingResult(0, "raw", "", Duration.ZERO)),
+                new StubObservation(new ObservationRunner.ObservationResult(0, "observed", "")),
+                history);
+
+        var result = runner.run(project, "ENGINEOS_REQUEST_V1\nInvestigate the repository.", state -> {
+        });
+        var source = history.get(result.engineeringResult().history().runId()).orElseThrow().sourceControl();
+
+        assertEquals("Git", source.provider());
+        assertEquals("main", source.before().branch());
+        assertEquals(source.before().headSha(), source.after().headSha());
+        assertTrue(source.before().clean());
+        assertTrue(source.after().clean());
+    }
+
+    @Test
+    void explicitCommitStoresCommitMetadataOnTheSameHistoryRecord() throws Exception {
+        Files.writeString(project.resolve("pom.xml"), "<project/>");
+        runGit("init", "-b", "main");
+        runGit("config", "user.name", "EngineOS Test");
+        runGit("config", "user.email", "engineos@example.test");
+        runGit("add", "pom.xml");
+        runGit("commit", "-m", "baseline");
+
+        var history = new FileEngineeringHistoryRepository(project.resolve("history"));
+        var runner = new EngineeringSessionRunner(
+                new StubCoder(new CodingResult(0, "raw", "", Duration.ZERO)),
+                new StubObservation(new ObservationRunner.ObservationResult(0, "observed", "")),
+                history);
+        var result = runner.run(project, "ENGINEOS_REQUEST_V1\nImplement the repository change.", state -> {
+        });
+        Files.writeString(project.resolve("change.txt"), "approved\n");
+        runGit("add", "change.txt");
+
+        var commit = runner.commit(project, result.engineeringResult().history().runId(),
+                "Implement repository change");
+        var saved = history.get(result.engineeringResult().history().runId()).orElseThrow();
+
+        assertTrue(commit.succeeded(), commit.error());
+        assertEquals(commit.commitHash(), saved.sourceControl().commitSha());
+        assertEquals("Implement repository change", saved.sourceControl().commitMessage());
     }
 
     @Test
@@ -173,6 +230,18 @@ class EngineeringSessionHistoryIntegrationTest {
                 .anyMatch(record -> record.engineeringRequest().endsWith("Second run.")));
         assertTrue(history.list().stream()
                 .noneMatch(record -> record.engineeringRequest().equals("Inspect the loaded workspace")));
+    }
+
+    private void runGit(String... arguments) throws Exception {
+        var command = new ArrayList<String>();
+        command.add("git");
+        command.addAll(Arrays.asList(arguments));
+        Process process = new ProcessBuilder(command)
+                .directory(project.toFile())
+                .redirectErrorStream(true)
+                .start();
+        String output = new String(process.getInputStream().readAllBytes());
+        assertEquals(0, process.waitFor(), output);
     }
 
     private static final class StubCoder implements ICodingAgent {

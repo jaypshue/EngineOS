@@ -64,6 +64,7 @@ public final class PowerShellObservationRunner implements ObservationRunner {
             case ENGINEOS -> engineOsRoot;
             case INTASSIST -> intAssistRoot;
             case MAVEN -> workspace.root();
+            case REPOSITORY -> workspace.root();
         };
         if (!java.nio.file.Files.isDirectory(targetRoot)) {
             throw new IllegalArgumentException(
@@ -76,6 +77,7 @@ public final class PowerShellObservationRunner implements ObservationRunner {
                     case ENGINEOS -> "EngineOS";
                     case INTASSIST -> "IntAssist";
                     case MAVEN -> "Maven";
+                    case REPOSITORY -> workspace.repositoryName();
                 });
     }
 
@@ -89,6 +91,15 @@ public final class PowerShellObservationRunner implements ObservationRunner {
             WorkspaceContext workspace,
             VerificationTarget target,
             boolean existingTarget) {
+        if (target.kind() == VerificationTarget.Kind.REPOSITORY) {
+            return new ObservationResult(0,
+                    "Repository investigation target: " + workspace.root()
+                            + System.lineSeparator()
+                            + "No separate behavioral verification target was required.",
+                    "",
+                    "EngineOS repository investigation",
+                    Duration.ZERO);
+        }
         if (target.kind() == VerificationTarget.Kind.MAVEN) {
             return runMavenVerification(target);
         }
@@ -167,6 +178,11 @@ public final class PowerShellObservationRunner implements ObservationRunner {
             Thread.currentThread().interrupt();
             return false;
         }
+    }
+
+    @Override
+    public Path observationsRoot() {
+        return engineOsRoot.resolve("observations");
     }
 
     private static Set<Long> snapshotJavaProcessIds() {

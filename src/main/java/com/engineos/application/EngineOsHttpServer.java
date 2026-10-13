@@ -48,7 +48,9 @@ public final class EngineOsHttpServer implements AutoCloseable {
         server.createContext("/api/engineos/health", this::health);
         server.createContext("/api/engineos/history", this::history);
         server.createContext("/api/engineos/verification-plan", this::verificationPlan);
+        server.createContext("/api/engineos/source-control", this::sourceControl);
         server.createContext("/api/engineos/active-target", this::activeTarget);
+        server.createContext("/api/engineos/commit", this::commit);
         server.createContext("/api/engineos/requests", this::request);
         executor = Executors.newCachedThreadPool(runnable -> {
             var thread = new Thread(runnable, "engineos-service-http");
@@ -111,11 +113,36 @@ public final class EngineOsHttpServer implements AutoCloseable {
                 project == null ? null : java.nio.file.Path.of(project), prompt));
     }
 
+    private void sourceControl(HttpExchange exchange) throws IOException {
+        if (!get(exchange)) {
+            return;
+        }
+        var project = query(exchange.getRequestURI()).get("project");
+        write(exchange, 200, service.sourceControl(
+                project == null ? null : java.nio.file.Path.of(project)));
+    }
+
     private void activeTarget(HttpExchange exchange) throws IOException {
         if (!get(exchange)) {
             return;
         }
         write(exchange, 200, Map.of("active", service.showActiveVerificationTarget()));
+    }
+
+    private void commit(HttpExchange exchange) throws IOException {
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            write(exchange, 405, Map.of("error", "POST is required"));
+            return;
+        }
+        try {
+            var request = mapper.readValue(exchange.getRequestBody(), CommitRequest.class);
+            write(exchange, 200, service.commitWorkspace(
+                    request.project() == null ? null : java.nio.file.Path.of(request.project()),
+                    request.runId(), request.message()));
+        } catch (RuntimeException exception) {
+            write(exchange, 400, Map.of("error",
+                    exception.getMessage() == null ? "Invalid commit request" : exception.getMessage()));
+        }
     }
 
     private void request(HttpExchange exchange) throws IOException {
@@ -169,6 +196,7 @@ public final class EngineOsHttpServer implements AutoCloseable {
                     body.project() == null ? null : java.nio.file.Path.of(body.project()),
                     body.prompt(),
                     body.selectedModel(),
+                    body.sourceControlBaseline(),
                     job::state,
                     job::activity);
             job.complete(job.cancelled() && result.state() != EngineOsService.ExecutionState.CANCELLED
@@ -255,7 +283,17 @@ public final class EngineOsHttpServer implements AutoCloseable {
         return java.net.URLDecoder.decode(value, StandardCharsets.UTF_8);
     }
 
-    public record SubmitRequest(String project, String prompt, String selectedModel) {
+    public record SubmitRequest(
+            String project,
+            String prompt,
+            String selectedModel,
+            com.engineos.infrastructure.git.GitSnapshot sourceControlBaseline) {
+        public SubmitRequest(String project, String prompt, String selectedModel) {
+            this(project, prompt, selectedModel, null);
+        }
+    }
+
+    public record CommitRequest(String project, String runId, String message) {
     }
 
     public record RequestAccepted(String requestId) {

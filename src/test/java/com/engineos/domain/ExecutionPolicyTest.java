@@ -63,4 +63,17 @@ class ExecutionPolicyTest {
         assertEquals(Duration.ofSeconds(600), policy.maximumDuration());
         assertTrue(policy.workspaceModificationAllowed());
     }
+
+    @Test
+    void existingSystemInvestigationUsesTheCodingAgentWithoutAllowingChanges() {
+        var request = EngineeringRequest.parse("""
+                Investigate this existing system and explain its architecture.
+                Do not modify the repository.
+                """);
+
+        var policy = ExecutionPolicy.forRequest(request);
+
+        assertEquals(ExecutionPhase.INVESTIGATION, policy.phase());
+        assertFalse(policy.workspaceModificationAllowed());
+    }
 }

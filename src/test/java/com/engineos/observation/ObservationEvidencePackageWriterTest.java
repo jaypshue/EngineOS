@@ -76,4 +76,34 @@ class ObservationEvidencePackageWriterTest {
         assertTrue(Files.readString(packageDirectory.resolve("manifest.json"))
                 .contains("executionPolicy"));
     }
+
+    @Test
+    void createsRepositoryPackageWhenObservationHasNoExternalPackagePath() throws Exception {
+        var result = new EngineeringResult(
+                "Investigate the repository.",
+                null,
+                java.util.List.of(),
+                null,
+                null,
+                null,
+                new EngineeringResult.History("repository-run", true),
+                new EngineeringResult.Supervision(
+                        "INSUFFICIENT_EVIDENCE", false, java.util.List.of(), "INVESTIGATED"));
+
+        ObservationEvidencePackageWriter.writeIfAvailable(
+                new ObservationRunner.ObservationResult(0, "Repository investigation completed.", ""),
+                result.request(),
+                result,
+                "Architecture and data-flow findings.",
+                tempDirectory);
+
+        var packageDirectory = new ObservationPackageService(tempDirectory)
+                .findCompletedForRun("repository-run")
+                .orElseThrow()
+                .directory();
+        assertTrue(Files.readString(packageDirectory.resolve("coding-agent-findings.txt"))
+                .contains("Architecture"));
+        assertTrue(Files.readString(packageDirectory.resolve("manifest.json"))
+                .contains("repository-run"));
+    }
 }

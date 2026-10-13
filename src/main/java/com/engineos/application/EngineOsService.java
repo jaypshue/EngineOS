@@ -4,6 +4,8 @@ import com.engineos.agent.AgentProvider;
 import com.engineos.domain.CodingResult;
 import com.engineos.domain.EngineeringResult;
 import com.engineos.history.EngineeringHistoryRecord;
+import com.engineos.infrastructure.git.GitCommitResult;
+import com.engineos.infrastructure.git.GitSnapshot;
 import com.engineos.observation.ObservationRunner;
 import com.engineos.observation.VerificationTarget;
 
@@ -26,6 +28,10 @@ public interface EngineOsService {
 
     ServiceVerificationPlan verificationPlan(Path project, String prompt);
 
+    default GitSnapshot sourceControl(Path project) {
+        return GitSnapshot.unavailable(project);
+    }
+
     ExecutionResult submit(
             Path project,
             String prompt,
@@ -33,12 +39,26 @@ public interface EngineOsService {
             Consumer<ExecutionState> stateSink,
             Consumer<String> activitySink);
 
+    default ExecutionResult submit(
+            Path project,
+            String prompt,
+            String selectedModel,
+            GitSnapshot sourceControlBaseline,
+            Consumer<ExecutionState> stateSink,
+            Consumer<String> activitySink) {
+        return submit(project, prompt, selectedModel, stateSink, activitySink);
+    }
+
     /** Requests cancellation of the currently owned execution, if any. */
     default boolean cancelActive() {
         return false;
     }
 
     boolean showActiveVerificationTarget();
+
+    default GitCommitResult commitWorkspace(Path project, String runId, String message) {
+        return new GitCommitResult(false, "", "", "Source-control commit is unavailable.");
+    }
 
     record ServiceHealth(boolean ready, String service) {
     }

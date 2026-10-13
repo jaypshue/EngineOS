@@ -46,8 +46,11 @@ class VerificationTargetTest {
     }
 
     @Test
-    void rejectsUnsupportedWorkspaceWithoutGuessing() {
-        assertThrows(IllegalArgumentException.class, () -> VerificationTarget.from(workspace(Path.of("README.md"))));
+    void treatsAnExistingRepositoryAsItsOwnInvestigationTarget() {
+        var target = VerificationTarget.from(workspace(Path.of("README.md")));
+
+        assertEquals(VerificationTarget.Kind.REPOSITORY, target.kind());
+        assertEquals("target", target.windowTitle());
     }
 
     @Test

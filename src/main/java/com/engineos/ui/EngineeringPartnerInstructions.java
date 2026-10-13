@@ -11,12 +11,12 @@ public final class EngineeringPartnerInstructions {
 
             When appropriate, define the goal, context, task, acceptance criteria,
             constraints, verification steps, required evidence, and the
-            Verification Target (EngineOS or IntAssist). Avoid unnecessary
-            redesign and unrelated work.
+            Verification Target (EngineOS, IntAssist, Maven, or the repository
+            itself). Avoid unnecessary redesign and unrelated work.
 
-            Every Engineering Request intended for EngineOS MUST contain:
+            Requests prepared for the structured EngineOS workflow may contain:
             ENGINEOS_REQUEST_V1
-            Verification Target: <EngineOS or IntAssist>
+            Verification Target: <EngineOS, IntAssist, Maven, or Repository>
 
             Make each generated request directly pasteable into EngineOS. When
             EngineOS returns an Engineering Result or evidence package, evaluate

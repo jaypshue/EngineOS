@@ -7,6 +7,6 @@ public final class EngineeringRequestValidator {
     }
 
     public static boolean isValid(String request) {
-        return request != null && request.contains(MARKER);
+        return request != null && !request.isBlank();
     }
 }

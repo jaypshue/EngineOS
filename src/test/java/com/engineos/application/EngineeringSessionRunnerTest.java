@@ -9,6 +9,7 @@ import com.engineos.observation.ObservationRunner;
 import com.engineos.observation.VerificationTarget;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import com.engineos.history.FileEngineeringHistoryRepository;
 
 import java.nio.file.Path;
 import java.nio.file.Files;
@@ -114,7 +115,8 @@ class EngineeringSessionRunnerTest {
         var runner = new EngineeringSessionRunner(
                 new MutatingCoder(new CodingResult(0, "coded", "", Duration.ZERO)),
                 new RecordingObservationRunner(
-                        new ObservationRunner.ObservationResult(0, "verified", "")));
+                        new ObservationRunner.ObservationResult(0, "verified", "")),
+                new FileEngineeringHistoryRepository(project.resolve("history")));
 
         var result = runner.run(project, "ENGINEOS_REQUEST_V1\nImplement the change.", state -> { });
         var engineering = result.engineeringResult();
@@ -124,6 +126,13 @@ class EngineeringSessionRunnerTest {
         assertEquals(engineering.changes().filesModified(),
                 engineering.control().changedFiles().size());
         assertTrue(engineering.assessment().actualChanges().contains("src/Main.java"));
+        assertFalse(result.engineeringResult().history().runId().isBlank());
+        var sourceControl = runner.history().get(result.engineeringResult().history().runId())
+                .orElseThrow().sourceControl();
+        assertEquals(sourceControl.before().headSha(), sourceControl.after().headSha());
+        assertFalse(sourceControl.after().clean());
+        assertTrue(sourceControl.after().changedFiles().contains("src/Main.java"));
+        assertTrue(sourceControl.commitSha().isBlank());
     }
 
     @Test
@@ -231,8 +240,8 @@ class EngineeringSessionRunnerTest {
                 "Workflow guidance: inspect existing implementation before editing.",
                 "Inspecting workspace",
                 "Applying change",
-                "Targeted verification: running the resolved verification target.",
-                "Targeted verification passed; review evidence gaps before broadening confidence."),
+                "Repository investigation target: capturing the investigation result.",
+                "Repository investigation result captured; review evidence gaps before broadening confidence."),
                 activities);
         assertEquals("INSUFFICIENT_EVIDENCE", result.engineeringResult().supervision().status());
         assertTrue(result.engineeringResult().supervision().evidenceGaps().stream()
