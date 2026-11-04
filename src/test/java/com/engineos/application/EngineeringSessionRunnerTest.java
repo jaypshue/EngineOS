@@ -183,6 +183,46 @@ class EngineeringSessionRunnerTest {
     }
 
     @Test
+    void restoresChangesMadeByCoderForNonModifyingRequestAndRecordsViolation() throws Exception {
+        Files.writeString(project.resolve("pom.xml"), "<project/>");
+        Path source = project.resolve("src/Main.java");
+        Files.createDirectories(source.getParent());
+        Files.writeString(source, "class Main {}\n");
+        runGit("init");
+        runGit("config", "user.email", "engineos-test@example.invalid");
+        runGit("config", "user.name", "EngineOS Test");
+        runGit("add", ".");
+        runGit("commit", "-m", "baseline");
+
+        var activities = new ArrayList<String>();
+        var runner = new EngineeringSessionRunner(
+                new MutatingCoder(new CodingResult(0, "coded", "", Duration.ZERO)),
+                new RecordingObservationRunner(new ObservationRunner.ObservationResult(0, "must not run", "")));
+
+        var proposal = runner.propose("investigation-boundary", project, """
+                ENGINEOS_REQUEST_V1
+                Goal:
+                Investigate the existing implementation.
+                Constraints:
+                Do not modify files. Investigate only.
+                """, null, null, state -> { }, activities::add);
+
+        assertTrue(proposal.nonModifying());
+        assertTrue(proposal.constraints().contains("automatically reverted"));
+
+        var result = runner.approve(proposal.requestId(), state -> { }, activities::add);
+
+        assertEquals(EngineeringSessionRunner.SessionState.FAILED, result.state());
+        String restored = Files.readString(source);
+        assertEquals("class Main {}\n", restored.replace("\r\n", "\n"),
+                "restored content: " + restored.replace("\n", "\\n"));
+        assertEquals("BOUNDARY_VIOLATION", result.engineeringResult().control().termination());
+        assertTrue(result.engineeringResult().changes().modifiedFiles().contains("src/Main.java"));
+        assertTrue(result.activity().stream().anyMatch(value -> value.contains("BOUNDARY VIOLATION")));
+        assertTrue(result.activity().stream().anyMatch(value -> value.contains("src/Main.java")));
+    }
+
+    @Test
     void stopsAtFailedCodingWithoutRunningObservation() {
         var observation = new RecordingObservationRunner(
                 new ObservationRunner.ObservationResult(0, "package", ""));

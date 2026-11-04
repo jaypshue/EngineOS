@@ -20,4 +20,8 @@ public interface GitRepository {
     List<GitBranch> branches(Path workspace);
 
     GitCommitResult commit(Path workspace, String message);
+
+    default GitRestoreResult restoreWorkspace(Path workspace, GitSnapshot baseline, GitSnapshot current) {
+        return GitRestoreResult.unavailable();
+    }
 }

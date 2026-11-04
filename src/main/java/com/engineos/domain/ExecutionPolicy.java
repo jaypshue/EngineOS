@@ -35,18 +35,39 @@ public record ExecutionPolicy(
     public static ExecutionPolicy forRequest(EngineeringRequest request) {
         String source = (request == null ? "" : request.raw()).toLowerCase();
         String normalizedSource = source.replace('-', ' ');
-        boolean investigation = (source.contains("investigate")
+        boolean nonModifying = isNonModifyingRequest(request);
+        boolean investigation = nonModifying && (source.contains("investigat")
                 || source.contains("existing system")
-                || source.contains("existing repository"))
-                && (source.contains("do not change")
-                || source.contains("do not modify")
-                || source.contains("without changing"));
+                || source.contains("existing repository")
+                || source.contains("read only")
+                || source.contains("readonly"));
         boolean verificationOnly = !investigation && (normalizedSource.contains("verification only")
                 || source.contains("do not change source")
                 || source.contains("do not modify source")
                 || source.contains("without changing source files"));
         return defaults(investigation ? ExecutionPhase.INVESTIGATION
                 : verificationOnly ? ExecutionPhase.VERIFICATION : ExecutionPhase.IMPLEMENTATION);
+    }
+
+    public static boolean isNonModifyingRequest(EngineeringRequest request) {
+        String source = request == null || request.raw() == null
+                ? "" : request.raw().toLowerCase().replace('-', ' ');
+        return source.contains("do not modify")
+                || source.contains("do not change")
+                || source.contains("read only")
+                || source.contains("readonly")
+                || source.contains("investigate only")
+                || source.contains("investigation only")
+                || source.contains("without changing")
+                || source.contains("without modifying")
+                || source.contains("verification only")
+                || source.contains("do not change source")
+                || source.contains("do not modify source")
+                || source.contains("without changing source files");
+    }
+
+    public boolean nonModifying() {
+        return !workspaceModificationAllowed();
     }
 
     private static Duration configuredDuration(String key, long fallbackSeconds) {

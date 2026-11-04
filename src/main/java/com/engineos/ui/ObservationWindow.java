@@ -1383,7 +1383,11 @@ public final class ObservationWindow {
         styleTextArea(details);
         var content = new JPanel(new BorderLayout(0, 8));
         content.setBackground(SURFACE);
-        content.add(label("Review the proposed task. No Coding Task will be created until you approve.",
+        String reviewMessage = proposal.nonModifying()
+                ? "NON-MODIFYING REQUEST: Any file changes made by the Coder will be automatically reverted "
+                        + "and recorded as a boundary violation. "
+                : "";
+        content.add(label(reviewMessage + "Review the proposed task. No Coding Task will be created until you approve.",
                 BODY_FONT, TEXT), BorderLayout.NORTH);
         var scroll = new JScrollPane(details);
         styleScrollPane(scroll);
@@ -1418,7 +1422,11 @@ public final class ObservationWindow {
                 + "\n\nRationale:\n" + proposal.rationale()
                 + "\n\nSuggested verification:\n" + proposal.verificationApproach()
                 + "\n\nProposal source:\n" + proposal.proposalSource()
-                + "\n\nWhat the Coder may do:\n" + proposal.allowedActions();
+                + "\n\nWhat the Coder may do:\n" + proposal.allowedActions()
+                + (proposal.nonModifying()
+                        ? "\n\nNON-MODIFYING REQUEST:\nAny file changes made by the Coder will be "
+                                + "automatically reverted and recorded as a boundary violation."
+                        : "");
     }
 
     private void approveProposal(EngineOsService.TaskProposal proposal, long generation) {

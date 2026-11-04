@@ -17,7 +17,7 @@ class DesktopRequestLifecycleTest {
                 "Start from repository evidence.", "No workspace changes are permitted.",
                 EngineeringTask.Status.PROPOSED,
                 "Unrelated refactors.", java.util.List.of("Explain the decision boundary."),
-                "Use the existing approval tests.", "AI-generated proposal.");
+                "Use the existing approval tests.", "AI-generated proposal.", true);
 
         String text = ObservationWindow.proposalText(proposal);
 
@@ -30,6 +30,7 @@ class DesktopRequestLifecycleTest {
         assertTrue(text.contains("Acceptance criteria:\n- Explain the decision boundary."));
         assertTrue(text.contains("Suggested verification:\nUse the existing approval tests."));
         assertTrue(text.contains("Proposal source:\nAI-generated proposal."));
+        assertTrue(text.contains("NON-MODIFYING REQUEST:"));
     }
 
     @Test

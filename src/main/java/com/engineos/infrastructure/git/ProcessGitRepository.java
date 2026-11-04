@@ -6,6 +6,7 @@ import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 public final class ProcessGitRepository implements GitRepository {
     private static final String FIELD_SEPARATOR = "\u001f";
@@ -169,6 +170,51 @@ public final class ProcessGitRepository implements GitRepository {
         var hash = run(workspace, List.of("rev-parse", "HEAD"));
         return new GitCommitResult(true, hash.succeeded() ? hash.standardOutput().trim() : "",
                 result.standardOutput(), hash.succeeded() ? "" : diagnostic(hash));
+    }
+
+    @Override
+    public GitRestoreResult restoreWorkspace(Path workspace, GitSnapshot baseline, GitSnapshot current) {
+        if (current == null || !current.repository() || baseline == null || !baseline.repository()) {
+            return GitRestoreResult.unavailable();
+        }
+        Path root = current.repositoryRoot();
+        Set<String> baselinePaths = baseline.changes().stream()
+                .map(GitFileChange::path)
+                .collect(java.util.stream.Collectors.toSet());
+        var restored = new ArrayList<String>();
+        var preserved = new ArrayList<String>();
+        var errors = new ArrayList<String>();
+        for (GitFileChange change : current.changes()) {
+            String path = change.path();
+            if (baselinePaths.contains(path)) {
+                preserved.add(path);
+                continue;
+            }
+            try {
+                Path resolved = root.resolve(path).normalize();
+                if (!resolved.startsWith(root)) {
+                    errors.add(path + " (unsafe path)");
+                    continue;
+                }
+                if ("?".equals(change.indexStatus()) && "?".equals(change.workTreeStatus())) {
+                    java.nio.file.Files.deleteIfExists(resolved);
+                    restored.add(path);
+                    continue;
+                }
+                var result = run(root, List.of("restore", "--source=HEAD", "--staged", "--worktree", "--", path));
+                if (!result.succeeded()) {
+                    errors.add(path + " (" + diagnostic(result) + ")");
+                    continue;
+                }
+                if ("A".equals(change.indexStatus()) || "A".equals(change.workTreeStatus())) {
+                    java.nio.file.Files.deleteIfExists(resolved);
+                }
+                restored.add(path);
+            } catch (IOException exception) {
+                errors.add(path + " (" + exception.getMessage() + ")");
+            }
+        }
+        return new GitRestoreResult(restored, preserved, errors);
     }
 
     private GitDiff diff(Path workspace, String reference, List<String> arguments) {

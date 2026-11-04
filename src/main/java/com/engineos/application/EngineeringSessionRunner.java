@@ -209,6 +209,10 @@ public final class EngineeringSessionRunner {
         try {
             var policy = prepared.policy;
             var verificationTarget = prepared.verificationTarget;
+            // The approval dialog may remain open while the workspace changes.
+            // Establish the enforcement baseline immediately before execution.
+            prepared.baseline = WorkspaceSnapshot.capture(prepared.project);
+            prepared.sourceControlBefore = git.snapshot(prepared.project);
             addActivity(prepared, "Workflow guidance: inspect existing implementation before editing.", activitySink);
             if (policy.phase() == ExecutionPhase.VERIFICATION) {
                 addActivity(prepared, "Execution phase: " + policy.phase()
@@ -231,8 +235,10 @@ public final class EngineeringSessionRunner {
             var finalSnapshot = WorkspaceSnapshot.capture(prepared.project);
             var sourceControlAfter = git.snapshot(prepared.project);
             var changedFiles = finalSnapshot.changedSince(prepared.baseline);
+            var gitChangedFiles = changedGitFiles(prepared.sourceControlBefore, sourceControlAfter);
             var finalChanges = WorkspaceChangeSummary.capture(prepared.project);
-            boolean boundaryViolation = !policy.workspaceModificationAllowed() && !changedFiles.isEmpty();
+            boolean boundaryViolation = !policy.workspaceModificationAllowed()
+                    && (!changedFiles.isEmpty() || !gitChangedFiles.isEmpty());
             String termination = boundaryViolation ? "BOUNDARY_VIOLATION"
                     : coding.exitCode() == 124 ? "TIMED_OUT"
                     : coding.exitCode() == 125 ? "BOUNDARY_VIOLATION"
@@ -244,10 +250,22 @@ public final class EngineeringSessionRunner {
                     finalChanges == null ? changedFiles : finalChanges.modifiedFiles(), 0,
                     List.of(policy.phase()));
             if (boundaryViolation) {
-                addActivity(prepared, "Execution boundary violation: prohibited workspace changes detected.",
-                        activitySink);
+                var violationFiles = java.util.stream.Stream.concat(
+                                changedFiles.stream().map(EngineeringSessionRunner::snapshotPath),
+                                gitChangedFiles.stream())
+                        .distinct()
+                        .sorted()
+                        .toList();
+                var restore = git.restoreWorkspace(prepared.project, prepared.sourceControlBefore, sourceControlAfter);
+                addActivity(prepared, "BOUNDARY VIOLATION: non-modifying request changed "
+                        + violationFiles + ". Automatically restored: " + restore.restoredFiles()
+                        + (restore.preservedFiles().isEmpty() ? ""
+                        : "; preserved pre-existing changes: " + restore.preservedFiles())
+                        + (restore.errors().isEmpty() ? "" : "; restore errors: " + restore.errors()), activitySink);
+                sourceControlAfter = git.snapshot(prepared.project);
                 return failure(prepared.runId, prepared.startedAt, prepared.project, prepared.prompt,
-                        prepared.selectedModel, "Verification changed protected workspace files: " + changedFiles,
+                        prepared.selectedModel, "Non-modifying request violated the workspace boundary; "
+                                + "changes were automatically restored: " + violationFiles,
                         coding, null, prepared.activities, null, stateSink, control, finalChanges,
                         prepared.sourceControlBefore, sourceControlAfter);
             }
@@ -363,11 +381,35 @@ public final class EngineeringSessionRunner {
             case IMPLEMENTATION -> "After approval, GitHub Copilot may use its configured tools and modify files in "
                     + "the selected workspace. EngineOS records changes and runs the resolved verification target.";
         };
+        String constraints = details.constraints();
+        if (prepared.policy.nonModifying()) {
+            constraints = constraints + "\n\nNON-MODIFYING REQUEST: Any file changes made by the Coder "
+                    + "will be automatically reverted and recorded as a boundary violation.";
+        }
         return new EngineOsService.TaskProposal(
                 prepared.runId, prepared.task.id().toString(), prepared.task.title(), details.goal(), details.scope(),
-                details.constraints(), prepared.task.rationale(), allowedActions, prepared.task.status(),
+                constraints, prepared.task.rationale(), allowedActions, prepared.task.status(),
                 details.outOfScope(), details.acceptanceCriteria(), details.verificationApproach(),
-                prepared.task.proposalSource());
+                prepared.task.proposalSource(), prepared.policy.nonModifying());
+    }
+
+    private static String snapshotPath(String change) {
+        int separator = change.indexOf(" | ");
+        return separator < 0 ? change : change.substring(0, separator).replaceFirst("^[ MADRCU?!]{1,2}\\s+", "");
+    }
+
+    private static List<String> changedGitFiles(GitSnapshot baseline, GitSnapshot current) {
+        if (current == null || !current.repository()) {
+            return List.of();
+        }
+        var baselinePaths = baseline == null ? List.<String>of()
+                : baseline.changes().stream().map(change -> change.path()).toList();
+        return current.changes().stream()
+                .map(change -> change.path())
+                .filter(path -> !baselinePaths.contains(path))
+                .distinct()
+                .sorted()
+                .toList();
     }
 
     private static void addActivity(
@@ -668,8 +710,8 @@ public final class EngineeringSessionRunner {
         private final com.engineos.domain.EngineeringTask task;
         private final ExecutionPolicy policy;
         private final VerificationTarget verificationTarget;
-        private final GitSnapshot sourceControlBefore;
-        private final WorkspaceSnapshot baseline;
+        private GitSnapshot sourceControlBefore;
+        private WorkspaceSnapshot baseline;
         private final List<String> activities = new ArrayList<>();
         private Instant executionStarted;
 

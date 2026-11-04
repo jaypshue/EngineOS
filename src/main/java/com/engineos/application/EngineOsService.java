@@ -92,7 +92,8 @@ public interface EngineOsService {
             String outOfScope,
             List<String> acceptanceCriteria,
             String verificationApproach,
-            String proposalSource) {
+            String proposalSource,
+            boolean nonModifying) {
         public TaskProposal {
             acceptanceCriteria = acceptanceCriteria == null ? List.of() : List.copyOf(acceptanceCriteria);
         }
@@ -101,7 +102,16 @@ public interface EngineOsService {
                             String constraints, String rationale, String allowedActions,
                             EngineeringTask.Status status) {
             this(requestId, taskId, title, goal, scope, constraints, rationale, allowedActions, status,
-                    "", List.of(), "", "");
+                    "", List.of(), "", "", false);
+        }
+
+        public TaskProposal(String requestId, String taskId, String title, String goal, String scope,
+                            String constraints, String rationale, String allowedActions,
+                            EngineeringTask.Status status, String outOfScope,
+                            List<String> acceptanceCriteria, String verificationApproach,
+                            String proposalSource) {
+            this(requestId, taskId, title, goal, scope, constraints, rationale, allowedActions, status,
+                    outOfScope, acceptanceCriteria, verificationApproach, proposalSource, false);
         }
     }
 
