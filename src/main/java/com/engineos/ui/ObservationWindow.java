@@ -80,7 +80,7 @@ public final class ObservationWindow {
     private static final Color HISTORY_BORDER = new Color(52, 70, 95);
     private static final int HISTORY_TRANSITION_DURATION_MS = 840;
     private static final int HISTORY_TRANSITION_TICK_MS = 40;
-    private static final String ENGINEOS_STARTUP_ACTIVITY = "EngineOS: Starting Coding Agent...";
+    private static final String ENGINEOS_STARTUP_ACTIVITY = "EngineOS: Preparing Engineering Task Proposal...";
     private static final String DEFAULT_INVESTIGATION_REQUEST = """
             Investigate this existing system. Identify its architecture, major
             components, dependencies, entry points, APIs, data flow,
@@ -104,7 +104,7 @@ public final class ObservationWindow {
     private final JLabel resultStatus = new JLabel();
     private final JLabel observationStatus = new JLabel();
     private final JButton sendButton = new JButton("COPY OBSERVATION");
-    private final JButton startButton = new JButton("SEND TO CODING AGENT");
+    private final JButton startButton = new JButton("SUBMIT ENGINEERING REQUEST");
     private final JButton cancelButton = new JButton("STOP CODING AGENT");
     private final JButton viewTargetButton = new JButton("VIEW ACTIVE TARGET");
     private final JButton historyButton = new JButton("HISTORY");
@@ -128,7 +128,7 @@ public final class ObservationWindow {
     private final JPanel resultPanel = new JPanel(new BorderLayout(0, 6));
     private final JPanel activityHeading = new JPanel(new BorderLayout(8, 0));
     private final JLabel activityIndicator = new JLabel("●");
-    private final JLabel activityHeadingLabel = new JLabel("CODING AGENT ACTIVITY");
+    private final JLabel activityHeadingLabel = new JLabel("ENGINEOS ACTIVITY");
     private final JLabel activityRetention = new JLabel();
     private final JComboBox<String> codingAgent = new JComboBox<>(new String[]{"GitHub Copilot"});
     private final JComboBox<String> model = new JComboBox<>();
@@ -347,7 +347,8 @@ public final class ObservationWindow {
         cancelButton.addActionListener(event -> {
             if (sessions != null && sessions.cancelActive()) {
                 cancelButton.setEnabled(false);
-                requestStatus.setText("Stopping coding agent...");
+                requestStatus.setText(requestLifecycle.codingAgentActive()
+                        ? "Stopping Coding Agent..." : "Cancelling request...");
                 requestStatus.setForeground(ERROR);
             }
         });
@@ -876,6 +877,8 @@ public final class ObservationWindow {
         boolean active = requestLifecycle.active();
         startButton.setEnabled(serviceReady && validRequest && !active);
         cancelButton.setEnabled(serviceReady && requestLifecycle.stopAvailable());
+        cancelButton.setText(requestLifecycle.codingAgentActive()
+                ? "STOP CODING AGENT" : "CANCEL REQUEST");
     }
 
     private boolean isValidWorkspace() {
@@ -1316,7 +1319,7 @@ public final class ObservationWindow {
         activityScroll.setVisible(true);
         activityPanel.setVisible(true);
         stopHistoryTransition();
-        setActivityActive(true);
+        setActivityActive(false);
         resultStatus.setText("No Engineering Result available for the current request.");
         resultStatus.setForeground(MUTED);
         resultPanel.setVisible(false);
@@ -1328,36 +1331,122 @@ public final class ObservationWindow {
         updateActionControls(true);
         activityPanel.revalidate();
         activityPanel.repaint();
-        new SwingWorker<EngineOsService.ExecutionResult, EngineOsService.ExecutionState>() {
+        new SwingWorker<EngineOsService.TaskProposal, Void>() {
             @Override
-            protected EngineOsService.ExecutionResult doInBackground() {
-                return sessions.submit(
+            protected EngineOsService.TaskProposal doInBackground() {
+                return sessions.propose(
+                        java.util.UUID.randomUUID().toString(),
                         Path.of(project),
                         prompt,
                         (String) model.getSelectedItem(),
                         preflightBaseline,
-                        this::publish,
+                        state -> { },
                         activity -> SwingUtilities.invokeLater(() -> appendActivity(activity)));
             }
             @Override
-            protected void process(java.util.List<EngineOsService.ExecutionState> states) {
+            protected void done() {
                 if (generation != requestGeneration) {
                     return;
                 }
-                if (!states.isEmpty()) {
-                    var state = states.get(states.size() - 1);
+                try {
+                    var proposal = get();
+                    requestLifecycle.serviceState(EngineOsService.ExecutionState.WAITING_FOR_APPROVAL);
+                    requestStatus.setText(requestLifecycle.displayText());
+                    requestStatus.setForeground(ACTIVE_AMBER);
+                    updateActionControls(EngineeringRequestValidator.isValid(promptArea.getText()));
+                    showProposalDecision(proposal, generation);
+                } catch (Exception exception) {
+                    Throwable cause = exception.getCause() == null ? exception : exception.getCause();
+                    requestLifecycle.serviceState(EngineOsService.ExecutionState.FAILED);
+                    setActivityActive(false);
+                    requestStatus.setText("Request failed/terminated: " + cause.getMessage());
+                    requestStatus.setForeground(ERROR);
+                    activityPanel.setVisible(true);
+                    activityScroll.setVisible(false);
+                    activityRetention.setVisible(true);
+                    activityRetention.setText(activityRetentionText(liveActivityCount));
+                    currentHistoryRecord = null;
+                    updateActionControls(EngineeringRequestValidator.isValid(promptArea.getText()));
+                } finally {
+                    refreshObservationClipboardState();
+                    updateRequestValidation();
+                }
+            }
+        }.execute();
+    }
+
+    private void showProposalDecision(EngineOsService.TaskProposal proposal, long generation) {
+        var details = new JTextArea(proposalText(proposal), 12, 56);
+        details.setEditable(false);
+        details.setLineWrap(true);
+        details.setWrapStyleWord(true);
+        styleTextArea(details);
+        var content = new JPanel(new BorderLayout(0, 8));
+        content.setBackground(SURFACE);
+        content.add(label("Review the proposed task. No Coding Task will be created until you approve.",
+                BODY_FONT, TEXT), BorderLayout.NORTH);
+        var scroll = new JScrollPane(details);
+        styleScrollPane(scroll);
+        content.add(scroll, BorderLayout.CENTER);
+
+        Object[] options = {"Approve Task", "Reject Task"};
+        var pane = new JOptionPane(content, JOptionPane.PLAIN_MESSAGE,
+                JOptionPane.DEFAULT_OPTION, null, options, options[1]);
+        var dialog = pane.createDialog(frame, "Proposed Engineering Task");
+        dialog.setDefaultCloseOperation(JDialog.DO_NOTHING_ON_CLOSE);
+        dialog.setVisible(true);
+        Object decision = pane.getValue();
+        dialog.dispose();
+        if (generation != requestGeneration) {
+            return;
+        }
+        if (options[0].equals(decision)) {
+            approveProposal(proposal, generation);
+        } else if (options[1].equals(decision)) {
+            rejectProposal(proposal, generation);
+        }
+    }
+
+    static String proposalText(EngineOsService.TaskProposal proposal) {
+        return "Task: " + proposal.title()
+                + "\nStatus: " + proposal.status()
+                + "\n\nGoal:\n" + proposal.goal()
+                + "\n\nIn scope:\n" + proposal.scope()
+                + "\n\nOut of scope:\n" + proposal.outOfScope()
+                + "\n\nAcceptance criteria:\n- " + String.join("\n- ", proposal.acceptanceCriteria())
+                + "\n\nConstraints:\n" + proposal.constraints()
+                + "\n\nRationale:\n" + proposal.rationale()
+                + "\n\nSuggested verification:\n" + proposal.verificationApproach()
+                + "\n\nProposal source:\n" + proposal.proposalSource()
+                + "\n\nWhat the Coder may do:\n" + proposal.allowedActions();
+    }
+
+    private void approveProposal(EngineOsService.TaskProposal proposal, long generation) {
+        requestLifecycle.serviceState(EngineOsService.ExecutionState.APPROVED);
+        requestStatus.setText(requestLifecycle.displayText());
+        requestStatus.setForeground(ACTIVE_AMBER);
+        startButton.setEnabled(false);
+        cancelButton.setEnabled(true);
+        new SwingWorker<EngineOsService.ExecutionResult, EngineOsService.ExecutionState>() {
+            @Override
+            protected EngineOsService.ExecutionResult doInBackground() {
+                return sessions.approve(proposal.requestId(), this::publish,
+                        activity -> SwingUtilities.invokeLater(() -> appendActivity(activity)));
+            }
+
+            @Override
+            protected void process(java.util.List<EngineOsService.ExecutionState> states) {
+                if (generation == requestGeneration && !states.isEmpty()) {
+                    var state = states.getLast();
                     requestLifecycle.serviceState(state);
                     requestStatus.setText(requestLifecycle.displayText());
                     requestStatus.setForeground(state == EngineOsService.ExecutionState.FAILED
                             ? ERROR : MUTED);
-                    updateActionControls(EngineeringRequestValidator.isValid(promptArea.getText()));
                     if (state == EngineOsService.ExecutionState.CODING_AGENT_WORKING) {
                         activityPanel.setVisible(true);
                         activityScroll.setVisible(true);
-                        activityScroll.revalidate();
                         setActivityActive(true);
-                    }
-                    if (state == EngineOsService.ExecutionState.RUNNING_OBSERVATION) {
+                    } else if (state == EngineOsService.ExecutionState.RUNNING_OBSERVATION) {
                         setActivityActive(false);
                         viewTargetButton.setEnabled(true);
                     }
@@ -1369,84 +1458,109 @@ public final class ObservationWindow {
                 if (generation != requestGeneration) {
                     return;
                 }
-                DesktopDiagnostics.stage("done-entered");
                 try {
-                    var result = get();
-                    DesktopDiagnostics.stage("result-obtained");
-                    requestLifecycle.serviceState(result.state());
-                    setActivityActive(false);
-                    requestStatus.setText(requestLifecycle.displayText());
-                    requestStatus.setForeground(result.state() == EngineOsService.ExecutionState.GREEN
-                            ? SUCCESS : ERROR);
-                    DesktopDiagnostics.stage("lifecycle-updated");
-                    currentRunId = result.engineeringResult() == null
-                            || result.engineeringResult().history() == null
-                            ? null : result.engineeringResult().history().runId();
-                    currentHistoryRecord = findHistoryRecord(currentRunId);
-                    DesktopDiagnostics.stage("history-loaded");
-                    resultStatus.setText(currentResultMatches(currentRunId, currentHistoryRecord)
-                            ? "Engineering Result available for the current request."
-                            : "No Engineering Result available for the current request.");
-                    resultStatus.setForeground(currentResultMatches(currentRunId, currentHistoryRecord)
-                            ? SUCCESS : MUTED);
-                    if (currentResultMatches(currentRunId, currentHistoryRecord)) {
-                        resultArea.setText(HistoryPresentation.format(currentHistoryRecord));
-                        resultArea.setCaretPosition(0);
-                        resultPanel.setVisible(true);
-                    }
-                    if (result.state() == EngineOsService.ExecutionState.GREEN) {
-                        currentObservation = packages.findCompletedForRun(currentRunId).orElse(null);
-                        observationStatus.setText(currentObservation == null
-                                ? "Request completed; no observation package available for this run."
-                                : "Observation ready for current request.");
-                        observationStatus.setForeground(currentObservation == null ? ERROR : SUCCESS);
-                    } else {
-                        currentObservation = null;
-                        observationStatus.setText(
-                                "No observation package available for the current request.");
-                        observationStatus.setForeground(MUTED);
-                    }
-                    DesktopDiagnostics.stage("observation-located");
-                    if (result.coding() != null && result.coding().usage().available()) {
-                        var sessionLine = result.coding().sessionId() == null ? ""
-                                : "\nSession: " + result.coding().sessionId();
-                        usageArea.setText(result.coding().usage().display() + sessionLine);
-                    } else if (result.coding() != null) {
-                        usageArea.setText("AI usage was not provided by the Copilot runtime.\n"
-                                + "Requested model: " + result.coding().requestedModel()
-                                + (result.coding().sessionId() == null ? ""
-                                : "\nSession: " + result.coding().sessionId()));
-                    }
-                    DesktopDiagnostics.stage("usage-updated");
-                    activityPanel.setVisible(true);
-                    activityScroll.setVisible(false);
-                    activityRetention.setVisible(true);
-                    activityRetention.setText(activityRetentionText(result.activity()));
-                    DesktopDiagnostics.stage("activity-retained");
-                    startHistoryTransition();
-                    DesktopDiagnostics.stage("history-transition-started");
-                    viewTargetButton.setEnabled(false);
-                    DesktopDiagnostics.stage("done-completed");
+                    finishSession(get(), generation);
                 } catch (Exception exception) {
-                    Throwable cause = exception.getCause() == null ? exception : exception.getCause();
-                    DesktopDiagnostics.exception("done", exception);
-                    requestLifecycle.serviceState(EngineOsService.ExecutionState.FAILED);
-                    setActivityActive(false);
-                    requestStatus.setText("Request failed/terminated: " + cause.getMessage());
-                    requestStatus.setForeground(ERROR);
-                    activityPanel.setVisible(true);
-                    activityScroll.setVisible(false);
-                    activityRetention.setVisible(true);
-                    activityRetention.setText(activityRetentionText(liveActivityCount));
-                    startHistoryTransition();
-                    currentHistoryRecord = null;
-                } finally {
-                    refreshObservationClipboardState();
-                    updateRequestValidation();
-                    DesktopDiagnostics.stage("controls-refreshed");
+                    showSessionFailure(exception, generation);
                 }
             }
         }.execute();
+    }
+
+    private void rejectProposal(EngineOsService.TaskProposal proposal, long generation) {
+        startButton.setEnabled(false);
+        cancelButton.setEnabled(false);
+        requestStatus.setText("Recording rejection...");
+        new SwingWorker<EngineOsService.ExecutionResult, Void>() {
+            @Override
+            protected EngineOsService.ExecutionResult doInBackground() {
+                return sessions.reject(proposal.requestId());
+            }
+
+            @Override
+            protected void done() {
+                if (generation != requestGeneration) {
+                    return;
+                }
+                try {
+                    finishSession(get(), generation);
+                } catch (Exception exception) {
+                    showSessionFailure(exception, generation);
+                }
+            }
+        }.execute();
+    }
+
+    private void finishSession(EngineOsService.ExecutionResult result, long generation) {
+        if (generation != requestGeneration) {
+            return;
+        }
+        requestLifecycle.serviceState(result.state());
+        setActivityActive(false);
+        requestStatus.setText(requestLifecycle.displayText());
+        requestStatus.setForeground(result.state() == EngineOsService.ExecutionState.GREEN
+                || result.state() == EngineOsService.ExecutionState.REJECTED ? SUCCESS : ERROR);
+        currentRunId = result.engineeringResult() == null
+                || result.engineeringResult().history() == null
+                ? null : result.engineeringResult().history().runId();
+        currentHistoryRecord = findHistoryRecord(currentRunId);
+        resultStatus.setText(currentResultMatches(currentRunId, currentHistoryRecord)
+                ? "Engineering Result available for the current request."
+                : "No Engineering Result available for the current request.");
+        resultStatus.setForeground(currentResultMatches(currentRunId, currentHistoryRecord)
+                ? SUCCESS : MUTED);
+        if (currentResultMatches(currentRunId, currentHistoryRecord)) {
+            resultArea.setText(HistoryPresentation.format(currentHistoryRecord));
+            resultArea.setCaretPosition(0);
+            resultPanel.setVisible(true);
+        }
+        if (result.state() == EngineOsService.ExecutionState.GREEN) {
+            currentObservation = packages.findCompletedForRun(currentRunId).orElse(null);
+            observationStatus.setText(currentObservation == null
+                    ? "Request completed; no observation package available for this run."
+                    : "Observation ready for current request.");
+            observationStatus.setForeground(currentObservation == null ? ERROR : SUCCESS);
+        } else {
+            currentObservation = null;
+            observationStatus.setText("No observation package available for the current request.");
+            observationStatus.setForeground(MUTED);
+        }
+        if (result.coding() != null && result.coding().usage().available()) {
+            var sessionLine = result.coding().sessionId() == null ? ""
+                    : "\nSession: " + result.coding().sessionId();
+            usageArea.setText(result.coding().usage().display() + sessionLine);
+        } else if (result.coding() != null) {
+            usageArea.setText("AI usage was not provided by the Copilot runtime.\n"
+                    + "Requested model: " + result.coding().requestedModel()
+                    + (result.coding().sessionId() == null ? ""
+                    : "\nSession: " + result.coding().sessionId()));
+        }
+        activityPanel.setVisible(true);
+        activityScroll.setVisible(false);
+        activityRetention.setVisible(true);
+        activityRetention.setText(activityRetentionText(result.activity()));
+        startHistoryTransition();
+        viewTargetButton.setEnabled(false);
+        refreshObservationClipboardState();
+        updateRequestValidation();
+        updateActionControls(EngineeringRequestValidator.isValid(promptArea.getText()));
+    }
+
+    private void showSessionFailure(Exception exception, long generation) {
+        if (generation != requestGeneration) {
+            return;
+        }
+        Throwable cause = exception.getCause() == null ? exception : exception.getCause();
+        requestLifecycle.serviceState(EngineOsService.ExecutionState.FAILED);
+        setActivityActive(false);
+        requestStatus.setText("Request failed/terminated: " + cause.getMessage());
+        requestStatus.setForeground(ERROR);
+        activityPanel.setVisible(true);
+        activityScroll.setVisible(false);
+        activityRetention.setVisible(true);
+        activityRetention.setText(activityRetentionText(liveActivityCount));
+        currentHistoryRecord = null;
+        updateActionControls(EngineeringRequestValidator.isValid(promptArea.getText()));
     }
 
     private void appendActivity(String activity) {
@@ -1931,11 +2045,14 @@ public final class ObservationWindow {
     private static String labelFor(EngineOsService.ExecutionState state) {
         return switch (state) {
             case STARTING -> "Starting...";
+            case WAITING_FOR_APPROVAL -> "Awaiting human approval...";
+            case APPROVED -> "Approved; starting...";
             case CODING_AGENT_WORKING -> "Coding agent working...";
             case RUNNING_OBSERVATION -> "Running observation...";
             case GREEN -> "GREEN - Observation ready";
             case FAILED -> "FAILED - See details";
             case CANCELLED -> "CANCELLED - Implementation not complete";
+            case REJECTED -> "REJECTED - Coding not run";
         };
     }
 

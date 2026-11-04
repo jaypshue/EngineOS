@@ -1,6 +1,7 @@
 package com.engineos.ui;
 
 import com.engineos.application.EngineOsService;
+import com.engineos.domain.EngineeringTask;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -8,6 +9,29 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DesktopRequestLifecycleTest {
+    @Test
+    void proposalPresentationIncludesGoalScopeConstraintsAndCoderPermissions() {
+        var proposal = new EngineOsService.TaskProposal(
+                "request-1", "task-1", "Inspect workspace", "Understand current behavior.",
+                "Review the service boundary.", "Do not modify source files.",
+                "Start from repository evidence.", "No workspace changes are permitted.",
+                EngineeringTask.Status.PROPOSED,
+                "Unrelated refactors.", java.util.List.of("Explain the decision boundary."),
+                "Use the existing approval tests.", "AI-generated proposal.");
+
+        String text = ObservationWindow.proposalText(proposal);
+
+        assertTrue(text.contains("Status: PROPOSED"));
+        assertTrue(text.contains("Goal:\nUnderstand current behavior."));
+        assertTrue(text.contains("In scope:\nReview the service boundary."));
+        assertTrue(text.contains("Constraints:\nDo not modify source files."));
+        assertTrue(text.contains("What the Coder may do:\nNo workspace changes are permitted."));
+        assertTrue(text.contains("Out of scope:\nUnrelated refactors."));
+        assertTrue(text.contains("Acceptance criteria:\n- Explain the decision boundary."));
+        assertTrue(text.contains("Suggested verification:\nUse the existing approval tests."));
+        assertTrue(text.contains("Proposal source:\nAI-generated proposal."));
+    }
+
     @Test
     void tracksRecognizedSubmittedRunningAndCompletedRequest() {
         var lifecycle = new DesktopRequestLifecycle();
@@ -17,8 +41,14 @@ class DesktopRequestLifecycleTest {
         lifecycle.submitted();
         assertEquals(DesktopRequestLifecycle.State.SUBMITTED, lifecycle.state());
         assertTrue(lifecycle.stopAvailable());
-        assertTrue(lifecycle.codingAgentActive());
+        assertFalse(lifecycle.codingAgentActive());
         assertEquals("Request starting...", lifecycle.displayText());
+        lifecycle.serviceState(EngineOsService.ExecutionState.WAITING_FOR_APPROVAL);
+        assertEquals(DesktopRequestLifecycle.State.AWAITING_APPROVAL, lifecycle.state());
+        assertFalse(lifecycle.codingAgentActive());
+        assertEquals("Proposed task awaiting your approval.", lifecycle.displayText());
+        lifecycle.serviceState(EngineOsService.ExecutionState.APPROVED);
+        assertEquals(DesktopRequestLifecycle.State.APPROVED, lifecycle.state());
         lifecycle.serviceState(EngineOsService.ExecutionState.CODING_AGENT_WORKING);
         assertEquals(DesktopRequestLifecycle.State.RUNNING, lifecycle.state());
         assertTrue(lifecycle.stopAvailable());
@@ -58,8 +88,10 @@ class DesktopRequestLifecycleTest {
     void codingAgentActivityIsActiveOnlyWhileCodingAgentRuns() {
         var lifecycle = new DesktopRequestLifecycle();
         lifecycle.submitted();
-        assertTrue(lifecycle.codingAgentActive());
+        assertFalse(lifecycle.codingAgentActive());
 
+        lifecycle.serviceState(EngineOsService.ExecutionState.WAITING_FOR_APPROVAL);
+        assertFalse(lifecycle.codingAgentActive());
         lifecycle.serviceState(EngineOsService.ExecutionState.CODING_AGENT_WORKING);
         assertTrue(lifecycle.codingAgentActive());
 
@@ -101,5 +133,19 @@ class DesktopRequestLifecycleTest {
         assertEquals("Request cancelled/terminated.",
                 lifecycle.displayText());
         assertFalse(lifecycle.stopAvailable());
+    }
+
+    @Test
+    void rejectedProposalIsTerminalAndHasARecordedResult() {
+        var lifecycle = new DesktopRequestLifecycle();
+        lifecycle.submitted();
+        lifecycle.serviceState(EngineOsService.ExecutionState.WAITING_FOR_APPROVAL);
+        lifecycle.serviceState(EngineOsService.ExecutionState.REJECTED);
+
+        assertEquals(DesktopRequestLifecycle.State.REJECTED, lifecycle.state());
+        assertTrue(lifecycle.resultAvailable());
+        assertFalse(lifecycle.codingAgentActive());
+        assertFalse(lifecycle.stopAvailable());
+        assertEquals("Proposed task rejected; Engineering Result available.", lifecycle.displayText());
     }
 }

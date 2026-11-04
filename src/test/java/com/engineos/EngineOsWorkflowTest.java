@@ -27,7 +27,13 @@ class EngineOsWorkflowTest {
         assertEquals(EngineeringTask.Status.PROPOSED, task.status());
         assertEquals("engineer-provider", ((DeterministicEngineerAgent) new DeterministicEngineerAgent(
                 new AgentProvider("engineer-provider", "reasoning-model"))).provider().providerId());
-        var result = workflow.approveAndExecute(workspace, task, model, List.of("git", "status", "--short", "--branch"));
+        assertThrows(IllegalStateException.class,
+                () -> workflow.executeApproved(workspace, task, model, List.of("git", "status")));
+        assertEquals(EngineeringTask.Status.PROPOSED, task.status());
+
+        task.approve();
+        var result = workflow.executeApproved(
+                workspace, task, model, List.of("git", "status", "--short", "--branch"));
 
         assertTrue(result.succeeded());
         assertEquals(EngineeringTask.Status.COMPLETED, task.status());

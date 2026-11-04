@@ -150,12 +150,47 @@ public final class EngineOsHttpServer implements AutoCloseable {
         String prefix = "/api/engineos/requests/";
         if ("GET".equalsIgnoreCase(exchange.getRequestMethod()) && path.startsWith(prefix)) {
             String suffix = path.substring(prefix.length());
-            if (suffix.endsWith("/activity")) {
+            if (suffix.endsWith("/proposal")) {
+                requestProposal(exchange, suffix.substring(0, suffix.length() - "/proposal".length()));
+            } else if (suffix.endsWith("/activity")) {
                 requestActivity(exchange, suffix.substring(0, suffix.length() - "/activity".length()));
             } else if (suffix.endsWith("/result")) {
                 requestResult(exchange, suffix.substring(0, suffix.length() - "/result".length()));
             } else {
                 requestStatus(exchange, suffix);
+            }
+            return;
+        }
+        if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && path.startsWith(prefix)
+                && path.endsWith("/approve")) {
+            String requestId = path.substring(prefix.length(), path.length() - "/approve".length());
+            RequestJob job = jobs.get(requestId);
+            if (job == null) {
+                write(exchange, 404, Map.of("error", "Unknown EngineOS request: " + requestId));
+            } else if (!job.approve()) {
+                write(exchange, 409, Map.of("error", "Request is not awaiting human approval."));
+            } else {
+                executionExecutor.submit(() -> executeApproved(job));
+                write(exchange, 202, Map.of("requestId", requestId, "state", job.state()));
+            }
+            return;
+        }
+        if ("POST".equalsIgnoreCase(exchange.getRequestMethod()) && path.startsWith(prefix)
+                && path.endsWith("/reject")) {
+            String requestId = path.substring(prefix.length(), path.length() - "/reject".length());
+            RequestJob job = jobs.get(requestId);
+            if (job == null) {
+                write(exchange, 404, Map.of("error", "Unknown EngineOS request: " + requestId));
+            } else if (!job.reject()) {
+                write(exchange, 409, Map.of("error", "Request is not awaiting human approval."));
+            } else {
+                try {
+                    job.complete(service.reject(requestId));
+                    write(exchange, 200, job.result());
+                } catch (RuntimeException exception) {
+                    job.fail(exception);
+                    write(exchange, 500, Map.of("error", message(exception, "Unable to reject request")));
+                }
             }
             return;
         }
@@ -167,7 +202,7 @@ public final class EngineOsHttpServer implements AutoCloseable {
             if (job == null) {
                 write(exchange, 404, Map.of("error", "Unknown EngineOS request: " + requestId));
             } else {
-                write(exchange, job.cancel(service::cancelActive) ? 202 : 409,
+                write(exchange, job.cancel(() -> service.cancelRequest(requestId)) ? 202 : 409,
                         Map.of("cancelled", job.cancelled()));
             }
             return;
@@ -176,27 +211,37 @@ public final class EngineOsHttpServer implements AutoCloseable {
             write(exchange, 405, Map.of("error", "POST is required for a new request or GET is required for a request status"));
             return;
         }
+        RequestJob job = null;
         try {
             var body = mapper.readValue(exchange.getRequestBody(), SubmitRequest.class);
             String requestId = UUID.randomUUID().toString();
-            var job = new RequestJob(requestId);
+            job = new RequestJob(requestId);
             jobs.put(requestId, job);
-            executionExecutor.submit(() -> execute(job, body));
-            write(exchange, 202, new RequestAccepted(requestId));
-        } catch (RuntimeException exception) {
-            write(exchange, 400, Map.of("error",
-                    exception.getMessage() == null ? "Invalid EngineOS request" : exception.getMessage()));
-        }
-    }
-
-    private void execute(RequestJob job, SubmitRequest body) {
-        job.executionThread = Thread.currentThread();
-        try {
-            var result = service.submit(
+            job.activity("Engineering request received; preparing a task proposal.");
+            var proposal = service.propose(
+                    requestId,
                     body.project() == null ? null : java.nio.file.Path.of(body.project()),
                     body.prompt(),
                     body.selectedModel(),
                     body.sourceControlBaseline(),
+                    job::state,
+                    job::activity);
+            job.proposed(proposal);
+            write(exchange, 202, new RequestAccepted(requestId, proposal, job.activities()));
+        } catch (RuntimeException exception) {
+            if (job != null) {
+                jobs.remove(job.requestId, job);
+            }
+            write(exchange, 400, Map.of("error",
+                    message(exception, "Invalid EngineOS request")));
+        }
+    }
+
+    private void executeApproved(RequestJob job) {
+        job.executionThread = Thread.currentThread();
+        try {
+            var result = service.approve(
+                    job.requestId,
                     job::state,
                     job::activity);
             job.complete(job.cancelled() && result.state() != EngineOsService.ExecutionState.CANCELLED
@@ -206,11 +251,26 @@ public final class EngineOsHttpServer implements AutoCloseable {
                     ? cancelledResult(job)
                     : new EngineOsService.ExecutionResult(
                             EngineOsService.ExecutionState.FAILED,
-                            "FAILED - " + (exception.getMessage() == null
-                                    ? "EngineOS request failed"
-                                    : exception.getMessage()),
+                            "FAILED - " + message(exception, "EngineOS request failed"),
                             null, null, job.activities(), null));
         }
+    }
+
+    private void requestProposal(HttpExchange exchange, String requestId) throws IOException {
+        RequestJob job = jobs.get(requestId);
+        if (job == null) {
+            write(exchange, 404, Map.of("error", "Unknown EngineOS request: " + requestId));
+            return;
+        }
+        if (job.proposal() == null) {
+            write(exchange, 409, Map.of("error", "Engineering Task proposal is unavailable."));
+            return;
+        }
+        write(exchange, 200, job.proposal());
+    }
+
+    private static String message(RuntimeException exception, String fallback) {
+        return exception.getMessage() == null ? fallback : exception.getMessage();
     }
 
     private static EngineOsService.ExecutionResult cancelledResult(RequestJob job) {
@@ -296,7 +356,10 @@ public final class EngineOsHttpServer implements AutoCloseable {
     public record CommitRequest(String project, String runId, String message) {
     }
 
-    public record RequestAccepted(String requestId) {
+    public record RequestAccepted(
+            String requestId,
+            EngineOsService.TaskProposal proposal,
+            List<String> activity) {
     }
 
     public record RequestStatus(
@@ -315,6 +378,7 @@ public final class EngineOsHttpServer implements AutoCloseable {
         private volatile EngineOsService.ExecutionResult result;
         private volatile Thread executionThread;
         private volatile boolean cancelled;
+        private volatile EngineOsService.TaskProposal proposal;
 
         private RequestJob(String requestId) {
             this.requestId = requestId;
@@ -322,6 +386,34 @@ public final class EngineOsHttpServer implements AutoCloseable {
 
         private void state(EngineOsService.ExecutionState state) {
             this.state = state;
+        }
+
+        private synchronized void proposed(EngineOsService.TaskProposal proposal) {
+            this.proposal = proposal;
+            this.state = EngineOsService.ExecutionState.WAITING_FOR_APPROVAL;
+            activity("Engineering Task is PROPOSED; awaiting an explicit human decision.");
+        }
+
+        private boolean approve() {
+            synchronized (this) {
+                if (result != null || state != EngineOsService.ExecutionState.WAITING_FOR_APPROVAL) {
+                    return false;
+                }
+                state = EngineOsService.ExecutionState.APPROVED;
+                activity("Human approved the proposed Engineering Task.");
+                return true;
+            }
+        }
+
+        private boolean reject() {
+            synchronized (this) {
+                if (result != null || state != EngineOsService.ExecutionState.WAITING_FOR_APPROVAL) {
+                    return false;
+                }
+                state = EngineOsService.ExecutionState.REJECTED;
+                activity("Human rejected the proposed Engineering Task.");
+                return true;
+            }
         }
 
         private synchronized void activity(String entry) {
@@ -337,8 +429,14 @@ public final class EngineOsHttpServer implements AutoCloseable {
             if (result != null) {
                 return false;
             }
+            boolean awaitingApproval = state == EngineOsService.ExecutionState.WAITING_FOR_APPROVAL;
             cancelled = true;
             serviceCancellation.getAsBoolean();
+            if (awaitingApproval) {
+                activity("Request cancelled before approval; Coding Agent was not invoked.");
+                complete(cancelledResult(this));
+                return true;
+            }
             Thread thread = executionThread;
             if (thread != null) {
                 thread.interrupt();
@@ -364,6 +462,21 @@ public final class EngineOsHttpServer implements AutoCloseable {
 
         private boolean complete() {
             return result != null;
+        }
+
+        private EngineOsService.ExecutionState state() {
+            return state;
+        }
+
+        private EngineOsService.TaskProposal proposal() {
+            return proposal;
+        }
+
+        private void fail(RuntimeException exception) {
+            complete(new EngineOsService.ExecutionResult(
+                    EngineOsService.ExecutionState.FAILED,
+                    "FAILED - " + message(exception, "EngineOS request failed"),
+                    null, null, activities(), null));
         }
 
         private EngineOsService.ExecutionResult result() {

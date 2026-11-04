@@ -65,17 +65,8 @@ public final class HttpEngineOsService implements EngineOsService {
     }
 
     @Override
-    public ExecutionResult submit(
-            Path project,
-            String prompt,
-            String selectedModel,
-            Consumer<ExecutionState> stateSink,
-            Consumer<String> activitySink) {
-        return submit(project, prompt, selectedModel, null, stateSink, activitySink);
-    }
-
-    @Override
-    public ExecutionResult submit(
+    public TaskProposal propose(
+            String requestId,
             Path project,
             String prompt,
             String selectedModel,
@@ -94,55 +85,114 @@ public final class HttpEngineOsService implements EngineOsService {
             var response = client.send(httpRequest, HttpResponse.BodyHandlers.ofByteArray());
             ensureSuccess(response);
             var accepted = mapper.readValue(response.body(), EngineOsHttpServer.RequestAccepted.class);
-            String requestId = accepted.requestId();
-            activeRequest.set(requestId);
-            ExecutionState lastState = ExecutionState.STARTING;
-            int activityCount = 0;
-            while (true) {
-                var statusResponse = client.send(
-                        HttpRequest.newBuilder(uri("/api/engineos/requests/" + requestId))
-                                .GET().build(),
-                        HttpResponse.BodyHandlers.ofByteArray());
-                ensureSuccess(statusResponse);
-                var status = mapper.readValue(statusResponse.body(), EngineOsHttpServer.RequestStatus.class);
-                var activityResponse = client.send(
-                        HttpRequest.newBuilder(uri("/api/engineos/requests/" + requestId + "/activity"))
-                                .GET().build(),
-                        HttpResponse.BodyHandlers.ofByteArray());
-                ensureSuccess(activityResponse);
-                var activity = mapper.readValue(
-                        activityResponse.body(), EngineOsHttpServer.RequestActivity.class);
-                while (activityCount < activity.activity().size()) {
-                    activitySink.accept(activity.activity().get(activityCount++));
-                }
-                if (status.state() != lastState) {
-                    lastState = status.state();
-                    stateSink.accept(lastState);
-                }
-                if (status.complete()) {
-                    var resultResponse = client.send(
-                            HttpRequest.newBuilder(uri("/api/engineos/requests/" + requestId + "/result"))
-                                    .GET().build(),
-                            HttpResponse.BodyHandlers.ofByteArray());
-                    ensureSuccess(resultResponse);
-                    return mapper.readValue(resultResponse.body(), ExecutionResult.class);
-                }
-                Thread.sleep(150);
-            }
+            String acceptedId = accepted.requestId();
+            activeRequest.set(acceptedId);
+            var proposal = get("/api/engineos/requests/" + acceptedId + "/proposal", TaskProposal.class);
+            accepted.activity().forEach(activitySink);
+            var activities = get("/api/engineos/requests/" + acceptedId + "/activity",
+                    EngineOsHttpServer.RequestActivity.class);
+            activities.activity().stream()
+                    .skip(accepted.activity().size())
+                    .forEach(activitySink);
+            stateSink.accept(ExecutionState.WAITING_FOR_APPROVAL);
+            return proposal;
         } catch (IOException exception) {
             throw requestFailure("/api/engineos/requests", exception);
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("EngineOS HTTP request interrupted", exception);
+        }
+    }
+
+    @Override
+    public ExecutionResult approve(
+            String requestId,
+            Consumer<ExecutionState> stateSink,
+            Consumer<String> activitySink) {
+        try {
+            var response = client.send(HttpRequest.newBuilder(uri(
+                            "/api/engineos/requests/" + requestId + "/approve"))
+                    .POST(HttpRequest.BodyPublishers.noBody()).build(),
+                    HttpResponse.BodyHandlers.ofByteArray());
+            ensureSuccess(response);
+            activeRequest.set(requestId);
+            return awaitResult(requestId, stateSink, activitySink);
+        } catch (IOException exception) {
+            throw requestFailure("/api/engineos/requests/" + requestId + "/approve", exception);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("EngineOS approval interrupted", exception);
         } finally {
             activeRequest.set(null);
         }
     }
 
     @Override
+    public ExecutionResult reject(String requestId) {
+        try {
+            var response = client.send(HttpRequest.newBuilder(uri(
+                            "/api/engineos/requests/" + requestId + "/reject"))
+                    .POST(HttpRequest.BodyPublishers.noBody()).build(),
+                    HttpResponse.BodyHandlers.ofByteArray());
+            ensureSuccess(response);
+            activeRequest.set(null);
+            return mapper.readValue(response.body(), ExecutionResult.class);
+        } catch (IOException exception) {
+            throw requestFailure("/api/engineos/requests/" + requestId + "/reject", exception);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("EngineOS rejection interrupted", exception);
+        }
+    }
+
+    private ExecutionResult awaitResult(
+            String requestId,
+            Consumer<ExecutionState> stateSink,
+            Consumer<String> activitySink) throws IOException, InterruptedException {
+        ExecutionState lastState = ExecutionState.APPROVED;
+        int activityCount = 0;
+        while (true) {
+            var statusResponse = client.send(
+                    HttpRequest.newBuilder(uri("/api/engineos/requests/" + requestId))
+                            .GET().build(),
+                    HttpResponse.BodyHandlers.ofByteArray());
+            ensureSuccess(statusResponse);
+            var status = mapper.readValue(statusResponse.body(), EngineOsHttpServer.RequestStatus.class);
+            var activityResponse = client.send(
+                    HttpRequest.newBuilder(uri("/api/engineos/requests/" + requestId + "/activity"))
+                            .GET().build(),
+                    HttpResponse.BodyHandlers.ofByteArray());
+            ensureSuccess(activityResponse);
+            var activity = mapper.readValue(
+                    activityResponse.body(), EngineOsHttpServer.RequestActivity.class);
+            while (activityCount < activity.activity().size()) {
+                activitySink.accept(activity.activity().get(activityCount++));
+            }
+            if (status.state() != lastState) {
+                lastState = status.state();
+                stateSink.accept(lastState);
+            }
+            if (status.complete()) {
+                var resultResponse = client.send(
+                        HttpRequest.newBuilder(uri("/api/engineos/requests/" + requestId + "/result"))
+                                .GET().build(),
+                        HttpResponse.BodyHandlers.ofByteArray());
+                ensureSuccess(resultResponse);
+                return mapper.readValue(resultResponse.body(), ExecutionResult.class);
+            }
+            Thread.sleep(150);
+        }
+    }
+
+    @Override
     public boolean cancelActive() {
         String requestId = activeRequest.get();
-        if (requestId == null) {
+        return requestId != null && cancelRequest(requestId);
+    }
+
+    @Override
+    public boolean cancelRequest(String requestId) {
+        if (requestId == null || requestId.isBlank()) {
             return false;
         }
         try {

@@ -27,36 +27,36 @@ public final class EngineOsWorkflow {
         return engineer.proposeTask(workspace, model);
     }
 
-    public CodingResult approveAndExecute(
+    public CodingResult executeApproved(
             WorkspaceContext workspace,
             EngineeringTask task,
             EngineeringModel model,
             java.util.List<String> approvedCommand) {
-        return approveAndExecute(workspace, task, model, approvedCommand, activity -> {
+        return executeApproved(workspace, task, model, approvedCommand, activity -> {
         });
     }
 
-    public CodingResult approveAndExecute(
+    public CodingResult executeApproved(
             WorkspaceContext workspace,
             EngineeringTask task,
             EngineeringModel model,
             java.util.List<String> approvedCommand,
             Consumer<String> activitySink) {
-        return approveAndExecute(workspace, task, model, approvedCommand, null, activitySink);
+        return executeApproved(workspace, task, model, approvedCommand, null, activitySink);
     }
 
-    public CodingResult approveAndExecute(
+    public CodingResult executeApproved(
             WorkspaceContext workspace,
             EngineeringTask task,
             EngineeringModel model,
             java.util.List<String> approvedCommand,
             String selectedModel,
             Consumer<String> activitySink) {
-        return approveAndExecute(workspace, task, model, approvedCommand, selectedModel,
+        return executeApproved(workspace, task, model, approvedCommand, selectedModel,
                 null, activitySink);
     }
 
-    public CodingResult approveAndExecute(
+    public CodingResult executeApproved(
             WorkspaceContext workspace,
             EngineeringTask task,
             EngineeringModel model,
@@ -64,7 +64,9 @@ public final class EngineOsWorkflow {
             String selectedModel,
             ExecutionPolicy policy,
             Consumer<String> activitySink) {
-        task.approve();
+        if (task.status() != EngineeringTask.Status.APPROVED) {
+            throw new IllegalStateException("Engineering task must be explicitly approved before execution");
+        }
         var codingTask = new CodingTask(task, approvedCommand);
         var result = selectedModel == null
                 ? policy == null

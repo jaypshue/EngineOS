@@ -82,10 +82,41 @@ readiness endpoint before using business endpoints. Use
 `-Dengineos.service.url=http://127.0.0.1:8766` or `ENGINEOS_SERVICE_URL` when
 the service uses another port. Keep the service process running in its own
 terminal; the desktop can start first, remains usable while disconnected, and
-reconnects automatically when the readiness endpoint becomes available. `POST
-/api/engineos/requests` returns a `requestId`, and the Desktop polls status,
-activity, and result. The existing ENGINEOS_REQUEST_V1 request flow and result
-semantics are unchanged.
+reconnects automatically when the readiness endpoint becomes available. `POST /api/engineos/requests` prepares an Engineering Task and returns a
+`requestId` plus the `PROPOSED` task. The Desktop displays the task's goal,
+scope, constraints, rationale, and permitted actions. No Coding Task is created
+until the user chooses **Approve Task**; **Reject Task** is recorded in
+Engineering History without invoking the Coding Agent. The API also exposes
+`GET /api/engineos/requests/{id}/proposal`,
+`POST /api/engineos/requests/{id}/approve`, and
+`POST /api/engineos/requests/{id}/reject`. After approval, the Desktop polls
+status, activity, and result. Verification-only and investigation requests use
+the same approval gate before their respective execution paths begin.
+
+## Engineering Task proposals
+
+The Service uses a separate Engineer Agent call through the existing Copilot CLI
+(`auto` model, 60-second timeout) to draft one structured task. This call has no
+available tools, denies tool execution, disables custom workspace instructions,
+and runs in a temporary directory rather than the selected workspace. It does
+not create a Coding Task, invoke the Coder Agent, or approve anything.
+
+The prompt includes the original request, EngineOS execution phase and modification
+boundary, repository name, Git branch/clean state, inferred project type, and a
+bounded relative file inventory. It does not read source contents; hidden paths
+and generated/dependency directories are omitted. File names are context, not
+proof of behavior. A missing CLI, model failure, timeout, invalid structured
+response, or oversized context produces a deterministic request-specific proposal.
+The proposal source and fallback reason are visible rather than silently hidden.
+
+The Desktop review dialog shows goal, in/out scope, acceptance criteria,
+constraints, rationale, and suggested verification. Human criteria and
+verification instructions are preserved alongside model suggestions. The original
+request and EngineOS execution policy remain authoritative. After explicit
+approval, the Coder receives both the original request and the reviewed proposal.
+The full proposal and decision are retained in terminal run activity/history.
+There is no autonomous planning loop, and suggested checks are not claimed as
+executed evidence.
 
 ## Evidence-driven coding workflow
 

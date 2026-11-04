@@ -2,6 +2,7 @@ package com.engineos.application;
 
 import com.engineos.agent.AgentProvider;
 import com.engineos.domain.CodingResult;
+import com.engineos.domain.EngineeringTask;
 import com.engineos.domain.EngineeringResult;
 import com.engineos.history.EngineeringHistoryRecord;
 import com.engineos.infrastructure.git.GitCommitResult;
@@ -32,26 +33,29 @@ public interface EngineOsService {
         return GitSnapshot.unavailable(project);
     }
 
-    ExecutionResult submit(
-            Path project,
-            String prompt,
-            String selectedModel,
-            Consumer<ExecutionState> stateSink,
-            Consumer<String> activitySink);
-
-    default ExecutionResult submit(
+    TaskProposal propose(
+            String requestId,
             Path project,
             String prompt,
             String selectedModel,
             GitSnapshot sourceControlBaseline,
             Consumer<ExecutionState> stateSink,
-            Consumer<String> activitySink) {
-        return submit(project, prompt, selectedModel, stateSink, activitySink);
-    }
+            Consumer<String> activitySink);
+
+    ExecutionResult approve(
+            String requestId,
+            Consumer<ExecutionState> stateSink,
+            Consumer<String> activitySink);
+
+    ExecutionResult reject(String requestId);
 
     /** Requests cancellation of the currently owned execution, if any. */
     default boolean cancelActive() {
         return false;
+    }
+
+    default boolean cancelRequest(String requestId) {
+        return cancelActive();
     }
 
     boolean showActiveVerificationTarget();
@@ -65,11 +69,40 @@ public interface EngineOsService {
 
     enum ExecutionState {
         STARTING,
+        WAITING_FOR_APPROVAL,
+        APPROVED,
         CODING_AGENT_WORKING,
         RUNNING_OBSERVATION,
         GREEN,
         FAILED,
-        CANCELLED
+        CANCELLED,
+        REJECTED
+    }
+
+    record TaskProposal(
+            String requestId,
+            String taskId,
+            String title,
+            String goal,
+            String scope,
+            String constraints,
+            String rationale,
+            String allowedActions,
+            EngineeringTask.Status status,
+            String outOfScope,
+            List<String> acceptanceCriteria,
+            String verificationApproach,
+            String proposalSource) {
+        public TaskProposal {
+            acceptanceCriteria = acceptanceCriteria == null ? List.of() : List.copyOf(acceptanceCriteria);
+        }
+
+        public TaskProposal(String requestId, String taskId, String title, String goal, String scope,
+                            String constraints, String rationale, String allowedActions,
+                            EngineeringTask.Status status) {
+            this(requestId, taskId, title, goal, scope, constraints, rationale, allowedActions, status,
+                    "", List.of(), "", "");
+        }
     }
 
     record ServiceVerificationPlan(

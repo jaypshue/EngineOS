@@ -39,6 +39,10 @@ public record CodingTask(
                 """
                 : "";
         return engineeringTask.intent()
+                + "\n\nHUMAN-APPROVED ENGINEERING TASK\n"
+                + engineeringTask.proposalText()
+                + "\nThe original request and EngineOS execution policy remain authoritative. "
+                + "Do not interpret suggested verification as permission to exceed those boundaries."
                 + "\n\n"
                 + """
                 ENGINEOS EXECUTION WORKFLOW

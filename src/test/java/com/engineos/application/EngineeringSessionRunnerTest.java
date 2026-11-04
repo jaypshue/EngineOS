@@ -28,23 +28,69 @@ class EngineeringSessionRunnerTest {
     Path project;
 
     @Test
+    void richAiAndFallbackProposalsAreReviewableAndPersistedWithoutBypassingApproval() {
+        for (boolean aiAvailable : List.of(true, false)) {
+            var history = new FileEngineeringHistoryRepository(project.resolve("history-" + aiAvailable));
+            var coder = new StubCoder(new CodingResult(0, "coded", "", Duration.ZERO));
+            var engineer = new com.engineos.agent.LlmEngineerAgent(new AgentProvider("test", "engineer"),
+                    prompt -> {
+                        if (!aiAvailable) {
+                            throw new com.engineos.agent.LlmEngineerAgent.ProposalGenerationException("Unavailable");
+                        }
+                        return """
+                                {"title":"Improve approval handling","goal":"Keep approval explicit.",
+                                 "scope":"Request decision handling.","outOfScope":"Unrelated APIs.",
+                                 "acceptanceCriteria":["No execution before approval."],
+                                 "constraints":"Preserve compatibility.","rationale":"Bound the request transition.",
+                                 "verificationApproach":"Use existing request tests."}
+                                """;
+                    });
+            var observation = new RecordingObservationRunner(new ObservationRunner.ObservationResult(0, "ok", ""));
+            var runner = new EngineeringSessionRunner(engineer, coder, observation, history);
+
+            var proposal = runner.propose("review-" + aiAvailable, project,
+                    "Improve approval handling.", null, null, state -> { }, activity -> { });
+
+            assertEquals(com.engineos.domain.EngineeringTask.Status.PROPOSED, proposal.status());
+            assertFalse(coder.called);
+            assertFalse(observation.called);
+            assertFalse(proposal.acceptanceCriteria().isEmpty());
+            assertFalse(proposal.outOfScope().isBlank());
+            assertFalse(proposal.verificationApproach().isBlank());
+            assertTrue(proposal.proposalSource().contains(aiAvailable ? "AI-generated" : "Deterministic fallback"));
+
+            var result = runner.approve(proposal.requestId(), state -> { }, activity -> { });
+
+            assertTrue(coder.called);
+            assertEquals(EngineeringSessionRunner.SessionState.GREEN, result.state());
+            var record = history.get(proposal.requestId()).orElseThrow();
+            assertTrue(record.activity().stream().anyMatch(value -> value.contains(proposal.proposalSource())));
+            assertTrue(record.activity().stream().anyMatch(value -> value.contains(proposal.verificationApproach())));
+            assertTrue(record.activity().stream().anyMatch(value -> value.contains("Human approved")));
+        }
+    }
+
+    @Test
     void localServiceExposesExecutionWithoutLeakingRunnerTypes() {
         var observation = new RecordingObservationRunner(
                 new ObservationRunner.ObservationResult(0, "package", ""));
-        EngineOsService service = new LocalEngineOsService(new EngineeringSessionRunner(
-                new StubCoder(new CodingResult(0, "coded", "", Duration.ZERO)),
-                observation));
+        var coder = new StubCoder(new CodingResult(0, "coded", "", Duration.ZERO));
+        EngineOsService service = new LocalEngineOsService(new EngineeringSessionRunner(coder, observation));
         var states = new ArrayList<EngineOsService.ExecutionState>();
 
-        var result = service.submit(project, "Make the requested change.", "selected-model",
-                states::add, activity -> { });
+        var proposal = service.propose("service-run", project, "Make the requested change.", "selected-model",
+                null, states::add, activity -> { });
+
+        assertEquals(com.engineos.domain.EngineeringTask.Status.PROPOSED, proposal.status());
+        assertFalse(coder.called);
+        assertFalse(observation.called);
+        assertEquals(EngineOsService.ExecutionState.WAITING_FOR_APPROVAL, states.getLast());
+
+        var result = service.approve(proposal.requestId(), states::add, activity -> { });
 
         assertEquals(EngineOsService.ExecutionState.GREEN, result.state());
-        assertEquals(List.of(
-                EngineOsService.ExecutionState.STARTING,
-                EngineOsService.ExecutionState.CODING_AGENT_WORKING,
-                EngineOsService.ExecutionState.RUNNING_OBSERVATION,
-                EngineOsService.ExecutionState.GREEN), states);
+        assertTrue(coder.called);
+        assertTrue(states.contains(EngineOsService.ExecutionState.CODING_AGENT_WORKING));
         assertTrue(result.engineeringResult() != null);
         assertTrue(observation.called);
     }
@@ -58,11 +104,11 @@ class EngineeringSessionRunnerTest {
                 observation);
         var states = new ArrayList<EngineeringSessionRunner.SessionState>();
 
-        var result = runner.run(project, "Make the requested change.", states::add);
+        var result = runApproved(runner, "Make the requested change.", null, states::add, activity -> { });
 
         assertEquals(EngineeringSessionRunner.SessionState.GREEN, result.state());
         assertEquals(List.of(
-                EngineeringSessionRunner.SessionState.STARTING,
+                EngineeringSessionRunner.SessionState.APPROVED,
                 EngineeringSessionRunner.SessionState.CODING_AGENT_WORKING,
                 EngineeringSessionRunner.SessionState.RUNNING_OBSERVATION,
                 EngineeringSessionRunner.SessionState.GREEN), states);
@@ -77,7 +123,7 @@ class EngineeringSessionRunnerTest {
                 "actual-model", new com.engineos.agent.AiUsage("actual-model", "2", "3", "4", "5", "6", null, null)));
         var runner = new EngineeringSessionRunner(coder, observation);
 
-        var result = runner.run(project, "Make the requested change.", "selected-model",
+        var result = runApproved(runner, "Make the requested change.", "selected-model",
                 state -> { }, activity -> { });
 
         assertEquals("selected-model", coder.selectedModel);
@@ -94,7 +140,7 @@ class EngineeringSessionRunnerTest {
                 "session-a");
         var runner = new EngineeringSessionRunner(new StubCoder(coding), observation);
 
-        var result = runner.run(project, "Make the requested change.", "selected-model",
+        var result = runApproved(runner, "Make the requested change.", "selected-model",
                 state -> { }, activity -> { });
 
         assertEquals("session-a", result.coding().sessionId());
@@ -118,7 +164,8 @@ class EngineeringSessionRunnerTest {
                         new ObservationRunner.ObservationResult(0, "verified", "")),
                 new FileEngineeringHistoryRepository(project.resolve("history")));
 
-        var result = runner.run(project, "ENGINEOS_REQUEST_V1\nImplement the change.", state -> { });
+        var result = runApproved(runner, "ENGINEOS_REQUEST_V1\nImplement the change.", null,
+                state -> { }, activity -> { });
         var engineering = result.engineeringResult();
 
         assertEquals(engineering.changes().modifiedFiles(),
@@ -144,7 +191,7 @@ class EngineeringSessionRunnerTest {
                 observation);
         var states = new ArrayList<EngineeringSessionRunner.SessionState>();
 
-        var result = runner.run(project, "Make the requested change.", states::add);
+        var result = runApproved(runner, "Make the requested change.", null, states::add, activity -> { });
 
         assertEquals(EngineeringSessionRunner.SessionState.FAILED, result.state());
         assertEquals(EngineeringSessionRunner.SessionState.FAILED, states.getLast());
@@ -164,7 +211,7 @@ class EngineeringSessionRunnerTest {
                 new StubCoder(new CodingResult(0, "coded", "", Duration.ZERO)),
                 observation);
 
-        var result = runner.run(project, """
+        var result = runApproved(runner, """
                 ENGINEOS_REQUEST_V1
                 Goal:
                 Verify the existing workflow.
@@ -172,7 +219,7 @@ class EngineeringSessionRunnerTest {
                 Do not change source files.
                 Verification:
                 Verification only.
-                """, state -> { });
+                """, null, state -> { }, activity -> { });
 
         assertTrue(result.engineeringResult().control() != null);
         assertEquals(com.engineos.domain.ExecutionPhase.VERIFICATION,
@@ -190,13 +237,13 @@ class EngineeringSessionRunnerTest {
         var coder = new StubCoder(new CodingResult(0, "must not run", "", Duration.ZERO));
         var runner = new EngineeringSessionRunner(coder, observation);
 
-        var result = runner.run(project, """
+        var result = runApproved(runner, """
                 ENGINEOS_REQUEST_V1
                 Goal:
                 Verify the existing EngineOS Desktop behavior.
                 Verification only.
                 Do not change source files.
-                """, state -> { });
+                """, null, state -> { }, activity -> { });
 
         assertEquals(EngineeringSessionRunner.SessionState.GREEN, result.state());
         assertFalse(coder.called);
@@ -228,21 +275,22 @@ class EngineeringSessionRunnerTest {
                 new ActivityCoder(new CodingResult(0, "coded", "", Duration.ZERO)),
                 observation);
 
-        var result = runner.run(
-                project,
+        var result = runApproved(
+                runner,
                 "Make the requested change.",
-                state -> {
-                },
+                null,
+                state -> { },
                 activities::add);
 
         assertEquals(EngineeringSessionRunner.SessionState.GREEN, result.state());
+        assertTrue(activities.getFirst().startsWith("Human approved Engineering Task "));
         assertEquals(List.of(
                 "Workflow guidance: inspect existing implementation before editing.",
                 "Inspecting workspace",
                 "Applying change",
                 "Repository investigation target: capturing the investigation result.",
                 "Repository investigation result captured; review evidence gaps before broadening confidence."),
-                activities);
+                activities.subList(1, activities.size()));
         assertEquals("INSUFFICIENT_EVIDENCE", result.engineeringResult().supervision().status());
         assertTrue(result.engineeringResult().supervision().evidenceGaps().stream()
                 .anyMatch(gap -> gap.contains("Semantic Copilot result unavailable")));
@@ -310,6 +358,49 @@ class EngineeringSessionRunnerTest {
             called = true;
             return result;
         }
+    }
+
+    @Test
+    void rejectedProposalIsRecordedWithoutInvokingCoder() {
+        var history = new FileEngineeringHistoryRepository(project.resolve("history"));
+        var coder = new StubCoder(new CodingResult(0, "must not run", "", Duration.ZERO));
+        var runner = new EngineeringSessionRunner(coder,
+                new RecordingObservationRunner(new ObservationRunner.ObservationResult(0, "unused", "")),
+                history);
+        var proposal = runner.propose("reject-run", project, """
+                ENGINEOS_REQUEST_V1
+                Goal:
+                Update the application.
+                Task:
+                Modify one project component.
+                Constraints:
+                Preserve compatibility.
+                """, "model", null, state -> { }, activity -> { });
+
+        assertEquals(com.engineos.domain.EngineeringTask.Status.PROPOSED, proposal.status());
+        assertFalse(coder.called);
+
+        var result = runner.reject(proposal.requestId(), state -> { }, activity -> { });
+
+        assertEquals(EngineeringSessionRunner.SessionState.REJECTED, result.state());
+        assertFalse(coder.called);
+        assertEquals("REJECTED", result.engineeringResult().supervision().implementationStatus());
+        var record = history.get(proposal.requestId()).orElseThrow();
+        assertEquals("REJECTED", record.finalStatus());
+        assertTrue(record.activity().stream().anyMatch(entry -> entry.contains("Human rejected")));
+    }
+
+    private EngineeringSessionRunner.SessionResult runApproved(
+            EngineeringSessionRunner runner,
+            String prompt,
+            String selectedModel,
+            Consumer<EngineeringSessionRunner.SessionState> stateSink,
+            Consumer<String> activitySink) {
+        String requestId = java.util.UUID.randomUUID().toString();
+        var proposal = runner.propose(requestId, project, prompt, selectedModel, null,
+                state -> { }, activity -> { });
+        assertEquals(com.engineos.domain.EngineeringTask.Status.PROPOSED, proposal.status());
+        return runner.approve(requestId, stateSink, activitySink);
     }
 
     private static final class RecordingObservationRunner implements ObservationRunner {

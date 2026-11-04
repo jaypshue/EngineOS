@@ -3,6 +3,7 @@ package com.engineos.application;
 import com.engineos.agent.AgentProvider;
 import com.engineos.agent.DeterministicEngineerAgent;
 import com.engineos.agent.ICodingAgent;
+import com.engineos.agent.EngineerAgent;
 import com.engineos.domain.CodingResult;
 import com.engineos.domain.CopilotResultDetails;
 import com.engineos.domain.EngineeringModel;
@@ -32,9 +33,9 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
-import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.ConcurrentHashMap;
 
 public final class EngineeringSessionRunner {
     private final RepositoryDiscovery discovery;
@@ -44,6 +45,7 @@ public final class EngineeringSessionRunner {
     private final EngineeringHistoryRepository history;
     private final GitRepository git;
     private final AtomicBoolean cancellationRequested = new AtomicBoolean();
+    private final ConcurrentHashMap<String, PreparedSession> pendingSessions = new ConcurrentHashMap<>();
 
     public EngineeringSessionRunner(ICodingAgent coder, ObservationRunner observationRunner) {
         this(new RepositoryDiscovery(), coder, observationRunner,
@@ -65,6 +67,14 @@ public final class EngineeringSessionRunner {
         this(new RepositoryDiscovery(), coder, observationRunner, history, new ProcessGitRepository());
     }
 
+    public EngineeringSessionRunner(
+            EngineerAgent engineer,
+            ICodingAgent coder,
+            ObservationRunner observationRunner,
+            EngineeringHistoryRepository history) {
+        this(new RepositoryDiscovery(), engineer, coder, observationRunner, history, new ProcessGitRepository());
+    }
+
     EngineeringSessionRunner(
             RepositoryDiscovery discovery,
             ICodingAgent coder,
@@ -79,6 +89,17 @@ public final class EngineeringSessionRunner {
             ObservationRunner observationRunner,
             EngineeringHistoryRepository history,
             GitRepository git) {
+        this(discovery, new DeterministicEngineerAgent(new AgentProvider("local", "engineer-dev")),
+                coder, observationRunner, history, git);
+    }
+
+    private EngineeringSessionRunner(
+            RepositoryDiscovery discovery,
+            EngineerAgent engineer,
+            ICodingAgent coder,
+            ObservationRunner observationRunner,
+            EngineeringHistoryRepository history,
+            GitRepository git) {
         this.discovery = Objects.requireNonNull(discovery);
         this.coder = Objects.requireNonNull(coder);
         this.observationRunner = Objects.requireNonNull(observationRunner);
@@ -86,7 +107,7 @@ public final class EngineeringSessionRunner {
         this.git = Objects.requireNonNull(git);
         this.workflow = new EngineOsWorkflow(
                 this.discovery,
-                new DeterministicEngineerAgent(new AgentProvider("local", "engineer-dev")),
+                Objects.requireNonNull(engineer),
                 this.coder);
     }
 
@@ -117,85 +138,100 @@ public final class EngineeringSessionRunner {
         }
     }
 
-    public SessionResult run(Path project, String prompt, Consumer<SessionState> stateSink) {
-        return run(project, prompt, null, stateSink, activity -> {
-        });
-    }
-
-    public SessionResult run(
+    public EngineOsService.TaskProposal propose(
+            String requestId,
             Path project,
             String prompt,
+            String selectedModel,
+            GitSnapshot sourceControlBaseline,
             Consumer<SessionState> stateSink,
             Consumer<String> activitySink) {
-        return run(project, prompt, null, stateSink, activitySink);
-    }
-
-    public SessionResult run(Path project, String prompt, String selectedModel,
-                             Consumer<SessionState> stateSink, Consumer<String> activitySink) {
-        return run(project, prompt, selectedModel, null, stateSink, activitySink);
-    }
-
-    public SessionResult run(Path project, String prompt, String selectedModel,
-                             GitSnapshot sourceControlBaseline,
-                             Consumer<SessionState> stateSink, Consumer<String> activitySink) {
-        cancellationRequested.set(false);
-        Instant startedAt = Instant.now();
-        String runId = UUID.randomUUID().toString();
-        var activities = new ArrayList<String>();
+        if (requestId == null || requestId.isBlank()) {
+            throw new IllegalArgumentException("Request ID is required.");
+        }
         if (project == null || !Files.isDirectory(project)) {
-            return failure(runId, startedAt, project, prompt, selectedModel,
-                    "Project directory does not exist: " + project, null, null, activities, stateSink);
+            throw new IllegalArgumentException("Project directory does not exist: " + project);
         }
         if (prompt == null || prompt.isBlank()) {
-            return failure(runId, startedAt, project, prompt, selectedModel,
-                    "Engineering prompt is required.", null, null, activities, stateSink);
+            throw new IllegalArgumentException("Engineering prompt is required.");
         }
+        if (pendingSessions.containsKey(requestId)) {
+            throw new IllegalStateException("An Engineering Task has already been proposed for this request.");
+        }
+
         stateSink.accept(SessionState.STARTING);
+        var workspace = discovery.load(project);
+        var model = new EngineeringModel(prompt);
+        var task = workflow.receiveIntent(workspace, prompt, model);
+        var policy = ExecutionPolicy.forRequest(EngineeringRequest.parse(prompt));
+        var declaration = VerificationTargetDeclaration.parse(prompt);
+        if (!declaration.error().isBlank()) {
+            throw new IllegalArgumentException(declaration.error());
+        }
+        var target = observationRunner.resolveTarget(workspace, declaration.requestedTarget());
+        var prepared = new PreparedSession(
+                requestId,
+                Instant.now(),
+                project.toAbsolutePath().normalize(),
+                prompt,
+                selectedModel,
+                workspace,
+                model,
+                task,
+                policy,
+                target,
+                sourceControlBaseline == null ? git.snapshot(project) : sourceControlBaseline,
+                WorkspaceSnapshot.capture(project));
+        addActivity(prepared, "Engineering Task proposed (PROPOSED): " + task.title()
+                + "\n" + task.proposalText()
+                + ". Awaiting explicit human approval.", activitySink);
+        if (pendingSessions.putIfAbsent(requestId, prepared) != null) {
+            throw new IllegalStateException("An Engineering Task has already been proposed for this request.");
+        }
+        stateSink.accept(SessionState.AWAITING_APPROVAL);
+        return proposal(prepared);
+    }
+
+    public SessionResult approve(
+            String requestId,
+            Consumer<SessionState> stateSink,
+            Consumer<String> activitySink) {
+        cancellationRequested.set(false);
+        PreparedSession prepared = pendingSessions.remove(requestId);
+        if (prepared == null) {
+            throw new IllegalStateException("No pending Engineering Task exists for request " + requestId);
+        }
+        prepared.task.approve();
+        addActivity(prepared, "Human approved Engineering Task " + prepared.task.id()
+                + " (" + prepared.task.title() + ").", activitySink);
+        stateSink.accept(SessionState.APPROVED);
+        prepared.executionStarted = Instant.now();
         try {
-            var workspace = discovery.load(project);
-            var model = new EngineeringModel(prompt);
-            var task = workflow.receiveIntent(workspace, prompt, model);
-            var policy = ExecutionPolicy.forRequest(EngineeringRequest.parse(prompt));
-            var executionStarted = Instant.now();
-            var sourceControlBefore = sourceControlBaseline == null
-                    ? git.snapshot(project) : sourceControlBaseline;
-            var baseline = WorkspaceSnapshot.capture(project);
-            var declaration = VerificationTargetDeclaration.parse(prompt);
-            if (!declaration.error().isBlank()) {
-                return failure(runId, startedAt, project, prompt, selectedModel,
-                        declaration.error(), null, null, activities, stateSink);
-            }
-            var verificationTarget = observationRunner.resolveTarget(
-                    workspace, declaration.requestedTarget());
-            activities.add("Workflow guidance: inspect existing implementation before editing.");
-            activitySink.accept(activities.getLast());
+            var policy = prepared.policy;
+            var verificationTarget = prepared.verificationTarget;
+            addActivity(prepared, "Workflow guidance: inspect existing implementation before editing.", activitySink);
             if (policy.phase() == ExecutionPhase.VERIFICATION) {
-                activities.add("Execution phase: " + policy.phase()
-                        + " (workspace modification prohibited).");
-                activitySink.accept(activities.getLast());
+                addActivity(prepared, "Execution phase: " + policy.phase()
+                        + " (workspace modification prohibited).", activitySink);
             }
             stateSink.accept(SessionState.CODING_AGENT_WORKING);
             CodingResult coding;
             if (policy.phase() == ExecutionPhase.VERIFICATION) {
                 String message = "Verification-only execution: Coding Agent skipped; "
                         + "EngineOS controls deterministic behavioral observation.";
-                activities.add(message);
-                activitySink.accept(message);
+                addActivity(prepared, message, activitySink);
                 coding = new CodingResult(0, message, "", java.time.Duration.ZERO,
-                        selectedModel, com.engineos.agent.AiUsage.unavailable());
+                        prepared.selectedModel, com.engineos.agent.AiUsage.unavailable());
+                prepared.task.complete();
             } else {
-                coding = workflow.approveAndExecute(
-                        workspace, task, model, List.of(), selectedModel,
-                        policy,
-                        activity -> {
-                            activities.add(activity);
-                            activitySink.accept(activity);
-                        });
+                coding = workflow.executeApproved(
+                        prepared.workspace, prepared.task, prepared.model, List.of(), prepared.selectedModel,
+                        policy, activity -> addActivity(prepared, activity, activitySink));
             }
-            var finalSnapshot = WorkspaceSnapshot.capture(project);
-            var sourceControlAfter = git.snapshot(project);
-            var changedFiles = finalSnapshot.changedSince(baseline);
-            var finalChanges = WorkspaceChangeSummary.capture(project);
+            var finalSnapshot = WorkspaceSnapshot.capture(prepared.project);
+            var sourceControlAfter = git.snapshot(prepared.project);
+            var changedFiles = finalSnapshot.changedSince(prepared.baseline);
+            var finalChanges = WorkspaceChangeSummary.capture(prepared.project);
             boolean boundaryViolation = !policy.workspaceModificationAllowed() && !changedFiles.isEmpty();
             String termination = boundaryViolation ? "BOUNDARY_VIOLATION"
                     : coding.exitCode() == 124 ? "TIMED_OUT"
@@ -203,74 +239,141 @@ public final class EngineeringSessionRunner {
                     : coding.exitCode() == 130 ? "CANCELLED"
                     : coding.succeeded() ? "COMPLETED" : "FAILED";
             var control = new ExecutionControl(
-                    policy.phase(), policy, executionStarted, Instant.now(), termination,
+                    policy.phase(), policy, prepared.executionStarted, Instant.now(), termination,
                     boundaryViolation || coding.exitCode() == 125,
                     finalChanges == null ? changedFiles : finalChanges.modifiedFiles(), 0,
                     List.of(policy.phase()));
             if (boundaryViolation) {
-                activities.add("Execution boundary violation: prohibited workspace changes detected.");
-                activitySink.accept(activities.getLast());
-                return failure(runId, startedAt, project, prompt, selectedModel,
-                        "Verification changed protected workspace files: " + changedFiles,
-                        coding, null, activities, null, stateSink, control, finalChanges,
-                        sourceControlBefore, sourceControlAfter);
+                addActivity(prepared, "Execution boundary violation: prohibited workspace changes detected.",
+                        activitySink);
+                return failure(prepared.runId, prepared.startedAt, prepared.project, prepared.prompt,
+                        prepared.selectedModel, "Verification changed protected workspace files: " + changedFiles,
+                        coding, null, prepared.activities, null, stateSink, control, finalChanges,
+                        prepared.sourceControlBefore, sourceControlAfter);
             }
             if (coding.exitCode() == 130 || cancellationRequested.get()) {
-                activities.add("Coding agent execution cancelled.");
-                activitySink.accept(activities.getLast());
-                return cancelled(runId, startedAt, project, prompt, selectedModel,
-                        coding, activities, stateSink, control, finalChanges,
-                        sourceControlBefore, sourceControlAfter);
+                addActivity(prepared, "Coding agent execution cancelled.", activitySink);
+                return cancelled(prepared.runId, prepared.startedAt, prepared.project, prepared.prompt,
+                        prepared.selectedModel, coding, prepared.activities, stateSink, control, finalChanges,
+                        prepared.sourceControlBefore, sourceControlAfter);
             }
             if (!coding.succeeded()) {
-                return failure(runId, startedAt, project, prompt, selectedModel,
-                        coding.summary() + " " + coding.standardError(), coding, null, activities, null,
-                        stateSink, control, finalChanges, sourceControlBefore, sourceControlAfter);
+                return failure(prepared.runId, prepared.startedAt, prepared.project, prepared.prompt,
+                        prepared.selectedModel, coding.summary() + " " + coding.standardError(),
+                        coding, null, prepared.activities, null, stateSink, control, finalChanges,
+                        prepared.sourceControlBefore, sourceControlAfter);
             }
-            activities.add(verificationTarget.kind() == VerificationTarget.Kind.REPOSITORY
+            addActivity(prepared, verificationTarget.kind() == VerificationTarget.Kind.REPOSITORY
                     ? "Repository investigation target: capturing the investigation result."
-                    : "Targeted verification: running the resolved verification target.");
-            activitySink.accept(activities.getLast());
+                    : "Targeted verification: running the resolved verification target.", activitySink);
             stateSink.accept(SessionState.RUNNING_OBSERVATION);
             var observation = observationRunner.run(
-                    workspace,
+                    prepared.workspace,
                     verificationTarget,
                     policy.phase() == ExecutionPhase.VERIFICATION
                             && verificationTarget.kind() == VerificationTarget.Kind.ENGINEOS);
             if (!observation.succeeded()) {
-                activities.add("Targeted verification failed; correction and re-verification remain required.");
-                activitySink.accept(activities.getLast());
-                return failure(runId, startedAt, project, prompt, selectedModel,
-                        "Observation failed: " + observation.error(), coding, observation,
-                        activities, verificationTarget, stateSink, control, finalChanges,
-                        sourceControlBefore, sourceControlAfter);
+                addActivity(prepared,
+                        "Targeted verification failed; correction and re-verification remain required.",
+                        activitySink);
+                return failure(prepared.runId, prepared.startedAt, prepared.project, prepared.prompt,
+                        prepared.selectedModel, "Observation failed: " + observation.error(), coding, observation,
+                        prepared.activities, verificationTarget, stateSink, control, finalChanges,
+                        prepared.sourceControlBefore, sourceControlAfter);
             }
             if (policy.phase() == ExecutionPhase.VERIFICATION) {
-                var observationChanges = WorkspaceSnapshot.capture(project).changedSince(baseline);
+                var observationChanges = WorkspaceSnapshot.capture(prepared.project)
+                        .changedSince(prepared.baseline);
                 if (!observationChanges.isEmpty()) {
-                    activities.add("Verification boundary violation: protected workspace files changed.");
-                    activitySink.accept(activities.getLast());
-                    return failure(runId, startedAt, project, prompt, selectedModel,
-                            "Verification changed protected workspace files during observation: "
-                                    + observationChanges,
-                            coding, observation, activities, verificationTarget, stateSink, control,
-                            WorkspaceChangeSummary.capture(project),
-                            sourceControlBefore, git.snapshot(project));
+                    addActivity(prepared, "Verification boundary violation: protected workspace files changed.",
+                            activitySink);
+                    return failure(prepared.runId, prepared.startedAt, prepared.project, prepared.prompt,
+                            prepared.selectedModel, "Verification changed protected workspace files during "
+                                    + "observation: " + observationChanges,
+                            coding, observation, prepared.activities, verificationTarget, stateSink, control,
+                            WorkspaceChangeSummary.capture(prepared.project),
+                            prepared.sourceControlBefore, git.snapshot(prepared.project));
                 }
             }
-            sourceControlAfter = git.snapshot(project);
-            activities.add(verificationTarget.kind() == VerificationTarget.Kind.REPOSITORY
+            sourceControlAfter = git.snapshot(prepared.project);
+            addActivity(prepared, verificationTarget.kind() == VerificationTarget.Kind.REPOSITORY
                     ? "Repository investigation result captured; review evidence gaps before broadening confidence."
-                    : "Targeted verification passed; review evidence gaps before broadening confidence.");
-            activitySink.accept(activities.getLast());
+                    : "Targeted verification passed; review evidence gaps before broadening confidence.",
+                    activitySink);
             stateSink.accept(SessionState.GREEN);
-            return complete(runId, startedAt, project, prompt, selectedModel,
-                    new SessionResult(SessionState.GREEN, "GREEN - Observation ready", coding, observation, activities),
-                    verificationTarget, control, finalChanges, sourceControlBefore, sourceControlAfter);
+            return complete(prepared.runId, prepared.startedAt, prepared.project, prepared.prompt,
+                    prepared.selectedModel,
+                    new SessionResult(SessionState.GREEN, "GREEN - Observation ready", coding, observation,
+                            prepared.activities),
+                    verificationTarget, control, finalChanges, prepared.sourceControlBefore, sourceControlAfter);
         } catch (RuntimeException exception) {
-            return failure(runId, startedAt, project, prompt, selectedModel,
-                    "Session failed: " + exception.getMessage(), null, null, activities, stateSink);
+            return failure(prepared.runId, prepared.startedAt, prepared.project, prepared.prompt,
+                    prepared.selectedModel, "Session failed: " + exception.getMessage(), null, null,
+                    prepared.activities, stateSink);
         }
+    }
+
+    public SessionResult reject(String requestId, Consumer<SessionState> stateSink, Consumer<String> activitySink) {
+        PreparedSession prepared = pendingSessions.remove(requestId);
+        if (prepared == null) {
+            throw new IllegalStateException("No pending Engineering Task exists for request " + requestId);
+        }
+        prepared.task.reject();
+        addActivity(prepared, "Human rejected Engineering Task " + prepared.task.id()
+                + " (" + prepared.task.title() + "); Coding Agent was not invoked.", activitySink);
+        stateSink.accept(SessionState.REJECTED);
+        return finishWithoutExecution(prepared, SessionState.REJECTED,
+                "REJECTED - Human declined the proposed task.", "REJECTED");
+    }
+
+    public SessionResult cancelPending(String requestId) {
+        PreparedSession prepared = pendingSessions.remove(requestId);
+        if (prepared == null) {
+            return null;
+        }
+        prepared.activities.add("Request cancelled before human approval; Coding Agent was not invoked.");
+        return finishWithoutExecution(prepared, SessionState.CANCELLED,
+                "CANCELLED - Request cancelled before approval.", "CANCELLED");
+    }
+
+    private SessionResult finishWithoutExecution(
+            PreparedSession prepared,
+            SessionState state,
+            String detail,
+            String termination) {
+        var changes = WorkspaceChangeSummary.capture(prepared.project);
+        var control = new ExecutionControl(
+                prepared.policy.phase(), prepared.policy, prepared.startedAt, Instant.now(), termination,
+                false, changes == null ? List.of() : changes.modifiedFiles(), 0,
+                List.of(prepared.policy.phase()));
+        return complete(prepared.runId, prepared.startedAt, prepared.project, prepared.prompt,
+                prepared.selectedModel,
+                new SessionResult(state, detail, null, null, prepared.activities),
+                prepared.verificationTarget, control, changes,
+                prepared.sourceControlBefore, git.snapshot(prepared.project));
+    }
+
+    private static EngineOsService.TaskProposal proposal(PreparedSession prepared) {
+        var details = prepared.task.proposal();
+        String allowedActions = switch (prepared.policy.phase()) {
+            case VERIFICATION -> "After approval, EngineOS runs bounded verification only; the Coding Agent is skipped "
+                    + "and workspace modifications are prohibited.";
+            case INVESTIGATION -> "After approval, the Coding Agent may inspect the selected workspace but may not "
+                    + "modify it; EngineOS records the resulting evidence.";
+            case IMPLEMENTATION -> "After approval, GitHub Copilot may use its configured tools and modify files in "
+                    + "the selected workspace. EngineOS records changes and runs the resolved verification target.";
+        };
+        return new EngineOsService.TaskProposal(
+                prepared.runId, prepared.task.id().toString(), prepared.task.title(), details.goal(), details.scope(),
+                details.constraints(), prepared.task.rationale(), allowedActions, prepared.task.status(),
+                details.outOfScope(), details.acceptanceCriteria(), details.verificationApproach(),
+                prepared.task.proposalSource());
+    }
+
+    private static void addActivity(
+            PreparedSession prepared, String activity, Consumer<String> activitySink) {
+        prepared.activities.add(activity);
+        activitySink.accept(activity);
     }
 
     public boolean showActiveVerificationTarget() {
@@ -467,7 +570,11 @@ public final class EngineeringSessionRunner {
                 verification.status(), verification.output(), verification.error(),
                 observation != null, observationReference);
         var uncertainties = new ArrayList<String>();
-        if (coding == null || !coding.succeeded()) {
+        if (result.state() == SessionState.REJECTED) {
+            uncertainties.add("Coding was not run because the human rejected the proposed task.");
+        } else if (result.state() == SessionState.CANCELLED && coding == null) {
+            uncertainties.add("Coding was not run because the request was cancelled before approval.");
+        } else if (coding == null || !coding.succeeded()) {
             uncertainties.add("Implementation did not complete successfully.");
         }
         if (coding == null || !coding.semanticResultAvailable()) {
@@ -485,11 +592,13 @@ public final class EngineeringSessionRunner {
         }
         boolean cancelled = result.state() == SessionState.CANCELLED;
         var assessment = com.engineos.history.EngineeringAssessment.from(record);
-        String supervisionStatus = cancelled ? "CANCELLED"
+        String supervisionStatus = result.state() == SessionState.REJECTED ? "REJECTED"
+                : cancelled ? "CANCELLED"
                 : "FAILED".equals(assessment.verificationStatus()) ? "FAILED"
                 : "SUFFICIENT".equals(assessment.evidenceStatus()) ? "VERIFIED"
                 : "INSUFFICIENT_EVIDENCE";
-        String implementationStatus = cancelled ? "CANCELLED"
+        String implementationStatus = result.state() == SessionState.REJECTED ? "REJECTED"
+                : cancelled ? "CANCELLED"
                 : control != null && control.phase() == ExecutionPhase.INVESTIGATION
                 ? coding != null && coding.succeeded() ? "INVESTIGATED" : "NOT_INVESTIGATED"
                 : coding != null && coding.succeeded() ? "IMPLEMENTED" : "NOT_IMPLEMENTED";
@@ -538,11 +647,58 @@ public final class EngineeringSessionRunner {
 
     public enum SessionState {
         STARTING,
+        AWAITING_APPROVAL,
+        APPROVED,
         CODING_AGENT_WORKING,
         RUNNING_OBSERVATION,
         GREEN,
         FAILED,
-        CANCELLED
+        CANCELLED,
+        REJECTED
+    }
+
+    private static final class PreparedSession {
+        private final String runId;
+        private final Instant startedAt;
+        private final Path project;
+        private final String prompt;
+        private final String selectedModel;
+        private final com.engineos.domain.WorkspaceContext workspace;
+        private final EngineeringModel model;
+        private final com.engineos.domain.EngineeringTask task;
+        private final ExecutionPolicy policy;
+        private final VerificationTarget verificationTarget;
+        private final GitSnapshot sourceControlBefore;
+        private final WorkspaceSnapshot baseline;
+        private final List<String> activities = new ArrayList<>();
+        private Instant executionStarted;
+
+        private PreparedSession(
+                String runId,
+                Instant startedAt,
+                Path project,
+                String prompt,
+                String selectedModel,
+                com.engineos.domain.WorkspaceContext workspace,
+                EngineeringModel model,
+                com.engineos.domain.EngineeringTask task,
+                ExecutionPolicy policy,
+                VerificationTarget verificationTarget,
+                GitSnapshot sourceControlBefore,
+                WorkspaceSnapshot baseline) {
+            this.runId = runId;
+            this.startedAt = startedAt;
+            this.project = project;
+            this.prompt = prompt;
+            this.selectedModel = selectedModel;
+            this.workspace = workspace;
+            this.model = model;
+            this.task = task;
+            this.policy = policy;
+            this.verificationTarget = verificationTarget;
+            this.sourceControlBefore = sourceControlBefore;
+            this.baseline = baseline;
+        }
     }
 
     public record SessionResult(

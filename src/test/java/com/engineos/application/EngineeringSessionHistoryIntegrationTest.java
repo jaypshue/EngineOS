@@ -48,8 +48,7 @@ class EngineeringSessionHistoryIntegrationTest {
                         "mvnw.cmd -q test", Duration.ofSeconds(3))),
                 history);
 
-        var result = runner.run(project, "ENGINEERING_REQUEST_V1\nImplement the feature.", state -> {
-        });
+        var result = runApproved(runner, "ENGINEERING_REQUEST_V1\nImplement the feature.");
 
         assertEquals(EngineeringSessionRunner.SessionState.FAILED, result.state());
         var saved = history.list();
@@ -102,8 +101,7 @@ class EngineeringSessionHistoryIntegrationTest {
                 new StubObservation(new ObservationRunner.ObservationResult(0, "not used", "")),
                 history);
 
-        runner.run(project, "ENGINEERING_REQUEST_V1\nFail this.", state -> {
-        });
+        runApproved(runner, "ENGINEERING_REQUEST_V1\nFail this.");
 
         var record = history.list().getFirst();
         assertEquals("FAILED", record.finalStatus());
@@ -125,8 +123,7 @@ class EngineeringSessionHistoryIntegrationTest {
                 new StubObservation(new ObservationRunner.ObservationResult(0, "observed", "")),
                 history);
 
-        runner.run(project, "ENGINEERING_REQUEST_V1\nRun verification.", state -> {
-        });
+        runApproved(runner, "ENGINEERING_REQUEST_V1\nRun verification.");
 
         assertEquals(1, history.list().size());
         assertEquals("SUCCEEDED", history.list().getFirst().observationStatus());
@@ -145,8 +142,7 @@ class EngineeringSessionHistoryIntegrationTest {
                 new StubCoder(new CodingResult(0, "raw", "", Duration.ZERO)),
                 new StubObservation(new ObservationRunner.ObservationResult(0, "observed", "")));
 
-        runner.run(project, "Make the requested change.", state -> {
-        });
+        runApproved(runner, "Make the requested change.");
 
         assertTrue(runner.history().list().isEmpty());
     }
@@ -166,8 +162,7 @@ class EngineeringSessionHistoryIntegrationTest {
                 new StubObservation(new ObservationRunner.ObservationResult(0, "observed", "")),
                 history);
 
-        var result = runner.run(project, "ENGINEOS_REQUEST_V1\nInvestigate the repository.", state -> {
-        });
+        var result = runApproved(runner, "ENGINEOS_REQUEST_V1\nInvestigate the repository.");
         var source = history.get(result.engineeringResult().history().runId()).orElseThrow().sourceControl();
 
         assertEquals("Git", source.provider());
@@ -191,8 +186,7 @@ class EngineeringSessionHistoryIntegrationTest {
                 new StubCoder(new CodingResult(0, "raw", "", Duration.ZERO)),
                 new StubObservation(new ObservationRunner.ObservationResult(0, "observed", "")),
                 history);
-        var result = runner.run(project, "ENGINEOS_REQUEST_V1\nImplement the repository change.", state -> {
-        });
+        var result = runApproved(runner, "ENGINEOS_REQUEST_V1\nImplement the repository change.");
         Files.writeString(project.resolve("change.txt"), "approved\n");
         runGit("add", "change.txt");
 
@@ -218,10 +212,8 @@ class EngineeringSessionHistoryIntegrationTest {
                 new StubObservation(new ObservationRunner.ObservationResult(0, "observed", "")),
                 history);
 
-        runner.run(project, "ENGINEERING_REQUEST_V1\nFirst run.", state -> {
-        });
-        runner.run(project, "ENGINEERING_REQUEST_V1\nSecond run.", state -> {
-        });
+        runApproved(runner, "ENGINEERING_REQUEST_V1\nFirst run.");
+        runApproved(runner, "ENGINEERING_REQUEST_V1\nSecond run.");
 
         assertEquals(2, history.list().size());
         assertTrue(history.list().stream()
@@ -242,6 +234,15 @@ class EngineeringSessionHistoryIntegrationTest {
                 .start();
         String output = new String(process.getInputStream().readAllBytes());
         assertEquals(0, process.waitFor(), output);
+    }
+
+    private EngineeringSessionRunner.SessionResult runApproved(
+            EngineeringSessionRunner runner, String prompt) {
+        String requestId = java.util.UUID.randomUUID().toString();
+        var proposal = runner.propose(requestId, project, prompt, "test-model", null,
+                state -> { }, activity -> { });
+        assertEquals(com.engineos.domain.EngineeringTask.Status.PROPOSED, proposal.status());
+        return runner.approve(requestId, state -> { }, activity -> { });
     }
 
     private static final class StubCoder implements ICodingAgent {

@@ -2,6 +2,8 @@ package com.engineos.application;
 
 import com.engineos.agent.AgentProvider;
 import com.engineos.agent.CopilotCoderAgent;
+import com.engineos.agent.CopilotProposalCompletion;
+import com.engineos.agent.LlmEngineerAgent;
 import com.engineos.history.FileEngineeringHistoryRepository;
 import com.engineos.observation.PowerShellObservationRunner;
 
@@ -21,6 +23,8 @@ public final class EngineOsServiceHost implements AutoCloseable {
     public EngineOsServiceHost(String bindAddress, int port, Path workspaceRoot) {
         var service = new LocalEngineOsService(
                 new EngineeringSessionRunner(
+                        new LlmEngineerAgent(new AgentProvider("github", "auto"),
+                                new CopilotProposalCompletion("auto")),
                         new CopilotCoderAgent(new AgentProvider("github", "copilot-cli")),
                         new PowerShellObservationRunner(workspaceRoot),
                         new FileEngineeringHistoryRepository()));

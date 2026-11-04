@@ -9,10 +9,13 @@ public final class DesktopRequestLifecycle {
     public enum State {
         RECOGNIZED,
         SUBMITTED,
+        AWAITING_APPROVAL,
+        APPROVED,
         RUNNING,
         COMPLETED,
         FAILED,
-        CANCELLED
+        CANCELLED,
+        REJECTED
     }
 
     private State state = State.RECOGNIZED;
@@ -28,7 +31,8 @@ public final class DesktopRequestLifecycle {
     }
 
     public boolean active() {
-        return state == State.SUBMITTED || state == State.RUNNING;
+        return state == State.SUBMITTED || state == State.AWAITING_APPROVAL
+                || state == State.APPROVED || state == State.RUNNING;
     }
 
     public boolean codingAgentActive() {
@@ -42,7 +46,7 @@ public final class DesktopRequestLifecycle {
     public void submitted() {
         state = State.SUBMITTED;
         resultAvailable = false;
-        codingAgentActive = true;
+        codingAgentActive = false;
     }
 
     public void serviceState(EngineOsService.ExecutionState serviceState) {
@@ -51,6 +55,14 @@ public final class DesktopRequestLifecycle {
         }
         switch (serviceState) {
             case STARTING -> state = State.SUBMITTED;
+            case WAITING_FOR_APPROVAL -> {
+                state = State.AWAITING_APPROVAL;
+                codingAgentActive = false;
+            }
+            case APPROVED -> {
+                state = State.APPROVED;
+                codingAgentActive = false;
+            }
             case CODING_AGENT_WORKING -> {
                 state = State.RUNNING;
                 codingAgentActive = true;
@@ -74,6 +86,11 @@ public final class DesktopRequestLifecycle {
                 resultAvailable = false;
                 codingAgentActive = false;
             }
+            case REJECTED -> {
+                state = State.REJECTED;
+                resultAvailable = true;
+                codingAgentActive = false;
+            }
         }
     }
 
@@ -95,6 +112,8 @@ public final class DesktopRequestLifecycle {
         return switch (state) {
             case RECOGNIZED -> "Request recognized; not submitted.";
             case SUBMITTED -> "Request starting...";
+            case AWAITING_APPROVAL -> "Proposed task awaiting your approval.";
+            case APPROVED -> "Task approved; execution starting...";
             case RUNNING -> "Request running...";
             case COMPLETED -> resultAvailable
                     ? "Request completed; Engineering Result available."
@@ -103,6 +122,9 @@ public final class DesktopRequestLifecycle {
                     ? "Request failed/terminated; Engineering Result available."
                     : "Request failed/terminated.";
             case CANCELLED -> "Request cancelled/terminated.";
+            case REJECTED -> resultAvailable
+                    ? "Proposed task rejected; Engineering Result available."
+                    : "Proposed task rejected.";
         };
     }
 }
