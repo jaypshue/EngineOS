@@ -109,6 +109,7 @@ public final class ObservationWindow {
     private final JButton viewTargetButton = new JButton("VIEW ACTIVE TARGET");
     private final JButton historyButton = new JButton("HISTORY");
     private final JButton gitButton = new JButton("GIT");
+    private final JButton refreshSourceControlButton = new JButton("REFRESH");
     private final JButton browseButton = new JButton("BROWSE...");
     private final JLabel requestValidation = new JLabel();
     private final JLabel workspaceTargetLabel = new JLabel();
@@ -152,6 +153,7 @@ public final class ObservationWindow {
     private boolean activityPulseBright;
     private long historyTransitionStartedAt;
     private long requestGeneration;
+    private long sourceControlRefreshGeneration;
     private boolean updatingTargetSelector;
 
     public ObservationWindow(Path observationsRoot) {
@@ -223,6 +225,12 @@ public final class ObservationWindow {
                 DesktopDiagnostics.stage("windowClosed");
             }
         });
+        frame.addWindowFocusListener(new WindowAdapter() {
+            @Override
+            public void windowGainedFocus(WindowEvent event) {
+                refreshSourceControl();
+            }
+        });
         frame.setContentPane(root);
         frame.setBackground(BACKGROUND);
         frame.setMinimumSize(new Dimension(900, 600));
@@ -279,6 +287,7 @@ public final class ObservationWindow {
         styleSecondaryButton(sendButton);
         styleSecondaryButton(viewTargetButton);
         styleSecondaryButton(gitButton);
+        styleSecondaryButton(refreshSourceControlButton);
         styleSecondaryButton(historyButton);
         styleSecondaryButton(browseButton);
         styleSecondaryButton(codingAgent);
@@ -312,6 +321,7 @@ public final class ObservationWindow {
         gitButton.setEnabled(isValidWorkspace());
         historyButton.addActionListener(event -> showHistory());
         gitButton.addActionListener(event -> showGitStatus());
+        refreshSourceControlButton.addActionListener(event -> refreshSourceControl());
 
         model.addActionListener(event -> onboarding.saveModel((String) model.getSelectedItem()));
         model.addActionListener(event -> renderPreflight());
@@ -630,8 +640,11 @@ public final class ObservationWindow {
 
         controls.add(javax.swing.Box.createVerticalStrut(8));
 
-        var sourceRow = targetCard("SOURCE CONTROL", sourceControlLabel, SectionGlyph.Kind.TARGET);
+        var sourceRow = new JPanel(new BorderLayout(8, 0));
         sourceRow.setOpaque(true);
+        sourceRow.add(targetCard("SOURCE CONTROL", sourceControlLabel, SectionGlyph.Kind.TARGET),
+                BorderLayout.CENTER);
+        sourceRow.add(refreshSourceControlButton, BorderLayout.EAST);
         sourceRow.setBackground(SURFACE_RAISED);
         sourceRow.setBorder(new CompoundBorder(
                 new LineBorder(new Color(38, 68, 78), 1, true),
@@ -904,14 +917,17 @@ public final class ObservationWindow {
         onboardingPanel.getParent().revalidate();
         onboardingPanel.getParent().repaint();
         refreshSourceControl();
+        refreshSourceControlButton.setEnabled(isValidWorkspace());
         updateVerificationPlan();
     }
 
     private void refreshSourceControl() {
+        long refreshGeneration = ++sourceControlRefreshGeneration;
         if (sessions == null || serviceError != null) {
             currentGitSnapshot = null;
             currentGitWorkspace = null;
             sourceControlLabel.setText("<html><font color='#94A3B8'>Unavailable until the service is connected.</font></html>");
+            refreshSourceControlButton.setEnabled(false);
             return;
         }
         String value = projectField.getText().trim();
@@ -922,9 +938,11 @@ public final class ObservationWindow {
             currentGitSnapshot = null;
             currentGitWorkspace = null;
             sourceControlLabel.setText("<html><font color='#F87171'>Invalid workspace path</font></html>");
+            refreshSourceControlButton.setEnabled(false);
             return;
         }
         currentGitWorkspace = workspace;
+        refreshSourceControlButton.setEnabled(true);
         sourceControlLabel.setText("<html><font color='#94A3B8'>Reading Git pre-flight state...</font></html>");
         new SwingWorker<GitSnapshot, Void>() {
             @Override
@@ -935,12 +953,16 @@ public final class ObservationWindow {
             @Override
             protected void done() {
                 try {
-                    if (!workspace.equals(currentGitWorkspace)) {
+                    if (refreshGeneration != sourceControlRefreshGeneration
+                            || !workspace.equals(currentGitWorkspace)) {
                         return;
                     }
                     currentGitSnapshot = get();
                     renderSourceControl();
                 } catch (Exception exception) {
+                    if (refreshGeneration != sourceControlRefreshGeneration) {
+                        return;
+                    }
                     currentGitSnapshot = GitSnapshot.unavailable(workspace);
                     sourceControlLabel.setText("<html><font color='#F87171'>Git pre-flight unavailable: "
                             + escape(exception.getMessage()) + "</font></html>");
@@ -1550,6 +1572,7 @@ public final class ObservationWindow {
         startHistoryTransition();
         viewTargetButton.setEnabled(false);
         refreshObservationClipboardState();
+        refreshSourceControl();
         updateRequestValidation();
         updateActionControls(EngineeringRequestValidator.isValid(promptArea.getText()));
     }
@@ -1568,6 +1591,7 @@ public final class ObservationWindow {
         activityRetention.setVisible(true);
         activityRetention.setText(activityRetentionText(liveActivityCount));
         currentHistoryRecord = null;
+        refreshSourceControl();
         updateActionControls(EngineeringRequestValidator.isValid(promptArea.getText()));
     }
 
