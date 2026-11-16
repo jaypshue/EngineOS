@@ -1526,28 +1526,99 @@ public final class ObservationWindow {
     }
 
     private void showProposalDecision(EngineOsService.TaskProposal proposal, long generation) {
-        var details = new JTextArea(proposalText(proposal), 12, 56);
-        details.setEditable(false);
-        details.setLineWrap(true);
-        details.setWrapStyleWord(true);
-        styleTextArea(details);
-        var content = new JPanel(new BorderLayout(0, 8));
-        content.setBackground(SURFACE);
+        var heading = new JPanel(new BorderLayout(14, 0));
+        heading.setOpaque(false);
+        heading.setBorder(new EmptyBorder(4, 8, 0, 8));
+        var title = label(proposal.title(), new Font("Segoe UI", Font.BOLD, 22), TEXT);
+        title.setBorder(new EmptyBorder(0, 0, 2, 0));
+        heading.add(title, BorderLayout.CENTER);
+        var status = label(proposal.status().name(), SMALL_FONT, new Color(120, 53, 15));
+        status.setOpaque(true);
+        status.setHorizontalAlignment(JLabel.CENTER);
+        status.setBorder(new CompoundBorder(
+                new LineBorder(ACTIVE_AMBER_BRIGHT, 1, true),
+                new EmptyBorder(5, 10, 5, 10)));
+        status.setBackground(new Color(254, 243, 199));
+        heading.add(status, BorderLayout.EAST);
+
+        var reviewIntro = new JPanel(new BorderLayout(10, 0));
+        reviewIntro.setBackground(new Color(39, 31, 18));
+        reviewIntro.setBorder(new CompoundBorder(
+                new MatteBorder(0, 3, 0, 0, ACTIVE_AMBER_BRIGHT),
+                new EmptyBorder(11, 12, 11, 12)));
+        var warningIcon = label("\u26A0", new Font("Segoe UI Symbol", Font.BOLD, 19), ACTIVE_AMBER_BRIGHT);
+        reviewIntro.add(warningIcon, BorderLayout.WEST);
         String reviewMessage = proposal.nonModifying()
                 ? "NON-MODIFYING REQUEST: Any file changes made by the Coder will be automatically reverted "
-                        + "and recorded as a boundary violation. "
-                : "";
-        content.add(label(reviewMessage + "Review the proposed task. No Coding Task will be created until you approve.",
-                BODY_FONT, TEXT), BorderLayout.NORTH);
-        var scroll = new JScrollPane(details);
-        styleScrollPane(scroll);
-        content.add(scroll, BorderLayout.CENTER);
+                        + "and recorded as a boundary violation."
+                : "Review the proposed task. No Coding Task will be created until you approve.";
+        reviewIntro.add(label("<html><b>" + (proposal.nonModifying()
+                ? "Non-modifying request" : "Approval required") + "</b><br>"
+                + escapeHtml(reviewMessage) + "</html>", BODY_FONT, TEXT), BorderLayout.CENTER);
 
-        Object[] options = {"Approve Task", "Reject Task"};
-        var pane = new JOptionPane(content, JOptionPane.PLAIN_MESSAGE,
-                JOptionPane.DEFAULT_OPTION, null, options, options[1]);
-        var dialog = pane.createDialog(frame, "Proposed Engineering Task");
-        dialog.setDefaultCloseOperation(JDialog.DO_NOTHING_ON_CLOSE);
+        var overview = new JPanel(new BorderLayout(0, 12));
+        overview.setOpaque(false);
+        overview.add(heading, BorderLayout.NORTH);
+        overview.add(reviewIntro, BorderLayout.CENTER);
+
+        var sections = new JPanel(new GridLayout(0, 1, 0, 10));
+        sections.setOpaque(false);
+        sections.add(proposalSection("GOAL", proposal.goal()));
+        sections.add(proposalSection("IN SCOPE", proposal.scope()));
+        sections.add(proposalSection("OUT OF SCOPE", proposal.outOfScope()));
+
+        var remaining = new JTextArea(proposalDetailsWithoutOverview(proposal), 10, 56);
+        remaining.setEditable(false);
+        remaining.setLineWrap(true);
+        remaining.setWrapStyleWord(true);
+        styleTextArea(remaining);
+        var remainingScroll = new JScrollPane(remaining);
+        styleScrollPane(remainingScroll);
+        remainingScroll.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+        remainingScroll.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED);
+        remainingScroll.setBorder(new CompoundBorder(
+                new MatteBorder(1, 0, 0, 0, BORDER),
+                new EmptyBorder(12, 0, 0, 0)));
+
+        var body = new JPanel(new BorderLayout(0, 12));
+        body.setOpaque(false);
+        body.add(sections, BorderLayout.NORTH);
+        body.add(remainingScroll, BorderLayout.CENTER);
+        var scroll = new JScrollPane(body);
+        styleScrollPane(scroll);
+        scroll.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+        scroll.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED);
+        scroll.setBorder(new LineBorder(BORDER, 1, true));
+        scroll.getVerticalScrollBar().setUnitIncrement(14);
+
+        var helper = label("Approving creates the coding task. Rejecting discards this proposal.",
+                new Font("Segoe UI", Font.BOLD, 14), new Color(203, 213, 225));
+        helper.setBorder(new EmptyBorder(12, 10, 12, 10));
+        var dialogContent = new JPanel(new BorderLayout(0, 12));
+        dialogContent.setBackground(SURFACE);
+        dialogContent.add(overview, BorderLayout.NORTH);
+        dialogContent.add(scroll, BorderLayout.CENTER);
+
+        var approveButton = new JButton("Approve Task");
+        stylePrimaryButton(approveButton);
+        var rejectButton = new JButton("Reject Task");
+        styleSecondaryButton(rejectButton);
+        Object[] options = {approveButton, rejectButton};
+        var pane = new JOptionPane(dialogContent, JOptionPane.PLAIN_MESSAGE,
+                JOptionPane.DEFAULT_OPTION, null, options, rejectButton);
+        var dialog = pane.createDialog(frame, "Review Proposed Task");
+        dialog.setDefaultCloseOperation(JDialog.DISPOSE_ON_CLOSE);
+        dialog.addWindowListener(new WindowAdapter() {
+            @Override
+            public void windowClosing(WindowEvent event) {
+                pane.setValue(rejectButton);
+            }
+        });
+        dialog.getContentPane().setBackground(SURFACE);
+        dialog.getContentPane().add(helper, BorderLayout.SOUTH);
+        dialog.setMinimumSize(new Dimension(700, 620));
+        dialog.setSize(840, 780);
+        dialog.setLocationRelativeTo(frame);
         dialog.setVisible(true);
         Object decision = pane.getValue();
         dialog.dispose();
@@ -1559,6 +1630,44 @@ public final class ObservationWindow {
         } else if (options[1].equals(decision)) {
             rejectProposal(proposal, generation);
         }
+    }
+
+    private static JPanel proposalSection(String heading, String value) {
+        var section = new JPanel(new BorderLayout(0, 9));
+        section.setBackground(SURFACE_RAISED);
+        section.setBorder(new CompoundBorder(
+                new MatteBorder(0, 3, 0, 0, new Color(65, 183, 142)),
+                new EmptyBorder(15, 16, 15, 16)));
+        section.add(label(heading, SECTION_FONT, ACCENT_HOVER), BorderLayout.NORTH);
+        var text = new JTextArea(value == null || value.isBlank() ? "Not specified." : value, 3, 60);
+        text.setEditable(false);
+        text.setLineWrap(true);
+        text.setWrapStyleWord(true);
+        text.setFont(BODY_FONT);
+        text.setForeground(TEXT);
+        text.setBackground(SURFACE_RAISED);
+        text.setBorder(null);
+        text.setMinimumSize(new Dimension(0, 0));
+        section.add(text, BorderLayout.CENTER);
+        return section;
+    }
+
+    private static String proposalDetailsWithoutOverview(EngineOsService.TaskProposal proposal) {
+        return "Acceptance criteria:\n- " + String.join("\n- ", proposal.acceptanceCriteria())
+                + "\n\nConstraints:\n" + proposal.constraints()
+                + "\n\nRationale:\n" + proposal.rationale()
+                + "\n\nSuggested verification:\n" + proposal.verificationApproach()
+                + "\n\nProposal source:\n" + proposal.proposalSource()
+                + "\n\nWhat the Coder may do:\n" + proposal.allowedActions()
+                + (proposal.nonModifying()
+                        ? "\n\nNON-MODIFYING REQUEST:\nAny file changes made by the Coder will be "
+                                + "automatically reverted and recorded as a boundary violation."
+                        : "");
+    }
+
+    private static String escapeHtml(String value) {
+        return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                .replace("\"", "&quot;");
     }
 
     static String proposalText(EngineOsService.TaskProposal proposal) {
