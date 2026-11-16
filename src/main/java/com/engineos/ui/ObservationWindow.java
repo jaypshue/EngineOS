@@ -15,6 +15,7 @@ import com.engineos.observation.ObservationPackageService;
 
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
+import javax.swing.DefaultListModel;
 import javax.swing.JDialog;
 import javax.swing.JList;
 import javax.swing.ListSelectionModel;
@@ -54,6 +55,7 @@ import java.awt.Graphics;
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
 import java.awt.BasicStroke;
+import java.awt.Rectangle;
 import java.awt.geom.Ellipse2D;
 import java.awt.geom.Line2D;
 import java.awt.event.WindowAdapter;
@@ -107,6 +109,7 @@ public final class ObservationWindow {
     private final JButton startButton = new JButton("SUBMIT ENGINEERING REQUEST");
     private final JButton cancelButton = new JButton("STOP CODING AGENT");
     private final JButton viewTargetButton = new JButton("VIEW ACTIVE TARGET");
+    private final JButton recordLiveTestButton = new JButton("Record live test (Ctrl+Shift+R)");
     private final JButton historyButton = new JButton("HISTORY");
     private final JButton gitButton = new JButton("GIT");
     private final JButton refreshSourceControlButton = new JButton("REFRESH");
@@ -148,6 +151,12 @@ public final class ObservationWindow {
     private int liveActivityCount;
     private Timer serviceRetryTimer;
     private final Timer activityPulseTimer = new Timer(900, event -> pulseActivityIndicator());
+    private final LiveTestRecorder liveTestRecorder = new LiveTestRecorder();
+    private final Timer liveTestRemainingTimer = new Timer(1000, event -> updateLiveTestRemaining());
+    private long liveTestStartedAt;
+    private String liveTestTargetName;
+    private long liveTestGeneration;
+    private RecordingOverlay liveTestOverlay;
     private final Timer historyTransitionTimer = new Timer(
             HISTORY_TRANSITION_TICK_MS, event -> animateHistoryTransition());
     private boolean activityPulseBright;
@@ -198,6 +207,8 @@ public final class ObservationWindow {
         promptArea.setText(DEFAULT_INVESTIGATION_REQUEST);
 
         configureControls();
+        recordLiveTestButton.setToolTipText("Ctrl+Shift+R");
+        recordLiveTestButton.setToolTipText("Record live test (Ctrl+Shift+R)");
         configureRequestValidation();
         refreshSourceControl();
         if (serviceError != null) {
@@ -218,6 +229,10 @@ public final class ObservationWindow {
             @Override
             public void windowClosing(WindowEvent event) {
                 DesktopDiagnostics.stage("windowClosing");
+                liveTestRecorder.stopHotkeyMonitor();
+                if (liveTestOverlay != null) {
+                    liveTestOverlay.close();
+                }
             }
 
             @Override
@@ -237,6 +252,7 @@ public final class ObservationWindow {
         frame.setSize(1040, onboardingPanel.isVisible() ? 790 : 680);
         frame.setLocation(40, 0);
         startServiceReconnectTimer();
+        liveTestRecorder.startHotkeyMonitor(() -> SwingUtilities.invokeLater(this::openHotkeyRecorder));
     }
 
     private void startServiceReconnectTimer() {
@@ -286,6 +302,7 @@ public final class ObservationWindow {
         styleSecondaryButton(cancelButton);
         styleSecondaryButton(sendButton);
         styleSecondaryButton(viewTargetButton);
+        styleSecondaryButton(recordLiveTestButton);
         styleSecondaryButton(gitButton);
         styleSecondaryButton(refreshSourceControlButton);
         styleSecondaryButton(historyButton);
@@ -372,6 +389,7 @@ public final class ObservationWindow {
                 observationStatus.setForeground(MUTED);
             }
         });
+        recordLiveTestButton.addActionListener(event -> toggleLiveTestRecording());
         sendButton.addActionListener(event -> {
             if (currentObservation != null) {
                 send(currentObservation);
@@ -686,7 +704,117 @@ public final class ObservationWindow {
         actions.add(cancelButton);
         actions.add(sendButton);
         actions.add(viewTargetButton);
+        actions.add(recordLiveTestButton);
         return actions;
+    }
+
+    private void toggleLiveTestRecording() {
+        openHotkeyRecorder();
+    }
+
+    private void openHotkeyRecorder() {
+        if (liveTestRecorder.isRecording()) {
+            liveTestRecorder.stop();
+            return;
+        }
+        try {
+            Path workspace = Path.of(projectField.getText().trim()).toAbsolutePath().normalize();
+            WindowSelectionDialog dialog = new WindowSelectionDialog(frame, workspace);
+            LiveTestRecorder.WindowInfo selected = dialog.showAndSelect();
+            if (selected != null) {
+                startLiveTest(workspace, new LiveTestRecorder.CaptureTarget(
+                        LiveTestRecorder.targetName(workspace),
+                        java.util.Optional.of(selected.title())), selected);
+            }
+        } catch (RuntimeException exception) {
+            status.setText("Unable to open live test recorder: " + exception.getMessage());
+            status.setForeground(ERROR);
+        }
+    }
+
+    private void startLiveTest(
+            Path workspace, LiveTestRecorder.CaptureTarget target, LiveTestRecorder.WindowInfo selectedWindow) {
+        liveTestGeneration++;
+        status.setText("Starting live test recording...");
+        status.setToolTipText(null);
+        status.setForeground(ACTIVE_AMBER);
+        status.setIcon(new StatusDotIcon(ACTIVE_AMBER));
+        liveTestRecorder.start(workspace, promptArea.getText(), currentRunId, target, selectedWindow,
+                result -> SwingUtilities.invokeLater(() -> finishLiveTestRecording(result)));
+        recordLiveTestButton.setText("Stop live test");
+        liveTestStartedAt = System.currentTimeMillis();
+        liveTestTargetName = target.windowTitle().orElse(target.name());
+        liveTestRemainingTimer.start();
+        updateLiveTestRemaining();
+        status.setText("Recording\u2026 " + liveTestTargetName);
+        status.setForeground(ACTIVE_AMBER);
+        liveTestOverlay = new RecordingOverlay(selectedWindow, liveTestRecorder::stop, liveTestRecorder);
+    }
+
+    private void finishLiveTestRecording(LiveTestRecorder.RecordingResult result) {
+        liveTestRemainingTimer.stop();
+        liveTestTargetName = null;
+        recordLiveTestButton.setText("Record live test");
+        if (liveTestOverlay != null) {
+            liveTestOverlay.close();
+            liveTestOverlay = null;
+        }
+        if (!result.succeeded()) {
+            status.setText("Live test recording failed: " + result.error());
+            status.setForeground(ERROR);
+            status.setIcon(new StatusDotIcon(ERROR));
+            return;
+        }
+        status.setToolTipText(null);
+        status.setIcon(new StatusDotIcon(SUCCESS));
+        status.setForeground(SUCCESS);
+        status.setText("Recording saved. Copying paths and opening folder...");
+        String fallbackNote = result.target().fallbackReason().isBlank()
+                ? "" : " " + result.target().fallbackReason();
+        long generation = liveTestGeneration;
+        new SwingWorker<LiveTestRecorder.DeliveryResult, Void>() {
+            @Override
+            protected LiveTestRecorder.DeliveryResult doInBackground() {
+                return LiveTestRecorder.deliverRecording(result);
+            }
+
+            @Override
+            protected void done() {
+                try {
+                    var delivery = get();
+                    if (generation != liveTestGeneration) {
+                        return;
+                    }
+                    boolean delivered = delivery.copied() && delivery.opened();
+                    status.setText(delivered
+                            ? LiveTestRecorder.deliverySummary(result, delivery) + fallbackNote
+                            : "Recording saved. " + delivery.error() + fallbackNote);
+                    status.setToolTipText(delivered ? null
+                            : result.video() + " | " + result.sidecar() + " | " + delivery.error());
+                    status.setForeground(delivered ? SUCCESS : ACTIVE_AMBER);
+                    status.setIcon(new StatusDotIcon(delivered ? SUCCESS : ACTIVE_AMBER));
+                    String message = LiveTestRecorder.deliverySummary(result, delivery)
+                            + "\n\nVideo:\n" + result.video().toAbsolutePath().normalize()
+                            + "\n\nMarkdown:\n" + result.sidecar().toAbsolutePath().normalize();
+                    JOptionPane.showMessageDialog(frame, message, "Live test recording complete",
+                            delivered ? JOptionPane.INFORMATION_MESSAGE : JOptionPane.WARNING_MESSAGE);
+                } catch (Exception exception) {
+                    DesktopDiagnostics.exception("live-test-delivery", exception);
+                    if (generation == liveTestGeneration) {
+                        status.setText("Recording saved. Delivery failed: " + exception.getMessage());
+                        status.setForeground(ACTIVE_AMBER);
+                        status.setIcon(new StatusDotIcon(ACTIVE_AMBER));
+                    }
+                }
+            }
+        }.execute();
+    }
+
+    private void updateLiveTestRemaining() {
+        long elapsed = Math.max(0, (System.currentTimeMillis() - liveTestStartedAt) / 1000);
+        long remaining = Math.max(0, LiveTestRecorder.DEFAULT_DURATION.toSeconds() - elapsed);
+        status.setText("Recording " + (liveTestTargetName == null ? "live test" : liveTestTargetName)
+                + " — " + remaining + " seconds remaining.");
     }
 
     private JPanel buildSectionHeading(
@@ -2286,6 +2414,174 @@ public final class ObservationWindow {
         @Override
         public boolean getScrollableTracksViewportHeight() {
             return false;
+        }
+    }
+
+    private final class WindowSelectionDialog {
+        private final JDialog dialog;
+        private final DefaultListModel<DisplayWindow> model = new DefaultListModel<>();
+        private final JList<DisplayWindow> list = new JList<>(model);
+        private final JButton launchButton = new JButton();
+        private final Path workspace;
+        private LiveTestRecorder.WindowInfo selected;
+
+        WindowSelectionDialog(JFrame owner, Path workspace) {
+            this.workspace = workspace;
+            dialog = new JDialog(owner, "Record which window?", true);
+            dialog.setLayout(new BorderLayout(8, 8));
+            JPanel intro = new JPanel(new BorderLayout(0, 4));
+            intro.setBorder(new EmptyBorder(10, 12, 0, 12));
+            intro.add(new JLabel("Choose the running application window to capture:"), BorderLayout.NORTH);
+            intro.add(new JLabel("Captures only the selected window. A stop overlay will appear on that window."), BorderLayout.SOUTH);
+            dialog.add(intro, BorderLayout.NORTH);
+            list.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+            dialog.add(new JScrollPane(list), BorderLayout.CENTER);
+
+            JPanel actions = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+            JButton refresh = new JButton("Refresh");
+            launchButton.setText("Launch " + LiveTestRecorder.targetName(workspace));
+            launchButton.setEnabled(LiveTestRecorder.targetLaunchDescription(workspace).isPresent());
+            JButton cancel = new JButton("Cancel");
+            JButton start = new JButton("Start recording");
+            actions.add(launchButton);
+            actions.add(refresh);
+            actions.add(cancel);
+            actions.add(start);
+            dialog.add(actions, BorderLayout.SOUTH);
+
+            refresh.addActionListener(event -> refreshWindows());
+            launchButton.addActionListener(event -> {
+                if (LiveTestRecorder.launchTarget(workspace)) {
+                    launchButton.setText("Launched — refreshing...");
+                    launchButton.setEnabled(false);
+                    Timer refreshTimer = new Timer(1200, ignored -> {
+                        refreshWindows();
+                        launchButton.setText("Launch " + LiveTestRecorder.targetName(workspace));
+                        launchButton.setEnabled(
+                                LiveTestRecorder.targetLaunchDescription(workspace).isPresent());
+                    });
+                    refreshTimer.setRepeats(false);
+                    refreshTimer.start();
+                }
+            });
+            cancel.addActionListener(event -> dialog.dispose());
+            start.addActionListener(event -> {
+                DisplayWindow choice = list.getSelectedValue();
+                selected = choice == null ? null : choice.window();
+                if (selected != null) {
+                    dialog.dispose();
+                }
+            });
+            dialog.setSize(560, 360);
+            dialog.setLocationRelativeTo(owner);
+            refreshWindows();
+        }
+
+        LiveTestRecorder.WindowInfo showAndSelect() {
+            dialog.setVisible(true);
+            return selected;
+        }
+
+        private void refreshWindows() {
+            new SwingWorker<java.util.List<LiveTestRecorder.WindowInfo>, Void>() {
+                @Override
+                protected java.util.List<LiveTestRecorder.WindowInfo> doInBackground() {
+                    return LiveTestRecorder.runningWindows();
+                }
+
+                @Override
+                protected void done() {
+                    try {
+                        String targetName = LiveTestRecorder.targetName(workspace);
+                        model.clear();
+                        int preferred = -1;
+                        var windows = get();
+                        for (int index = 0; index < windows.size(); index++) {
+                            LiveTestRecorder.WindowInfo window = windows.get(index);
+                            model.addElement(new DisplayWindow(window, window.title().toLowerCase()
+                                    .contains(targetName.toLowerCase())));
+                            if (preferred < 0 && window.title().toLowerCase()
+                                    .contains(targetName.toLowerCase())) {
+                                preferred = index;
+                            }
+                        }
+                        if (preferred < 0 && !model.isEmpty()) {
+                            preferred = 0;
+                        }
+                        if (preferred >= 0) {
+                            list.setSelectedIndex(preferred);
+                            list.ensureIndexIsVisible(preferred);
+                        }
+                    } catch (Exception exception) {
+                        status.setText("Unable to list running windows: " + exception.getMessage());
+                        status.setForeground(ERROR);
+                    }
+                }
+            }.execute();
+        }
+
+        private record DisplayWindow(LiveTestRecorder.WindowInfo window, boolean workspaceTarget) {
+            @Override
+            public String toString() {
+                return workspaceTarget ? "Workspace app (" + window.title() + ")" : window.toString();
+            }
+        }
+    }
+
+    private static final class RecordingOverlay {
+        private final JFrame frame = new JFrame();
+        private final Timer repositionTimer;
+        private final JLabel countdown = new JLabel();
+        private final Timer countdownTimer;
+
+        RecordingOverlay(LiveTestRecorder.WindowInfo window, Runnable stopAction, LiveTestRecorder recorder) {
+            frame.setUndecorated(true);
+            frame.setAlwaysOnTop(true);
+            frame.setType(java.awt.Window.Type.UTILITY);
+            JPanel panel = new JPanel(new BorderLayout(8, 4));
+            panel.setBorder(new EmptyBorder(10, 12, 10, 12));
+            panel.setBackground(new Color(127, 29, 29));
+            JLabel title = new JLabel("LIVE TEST RECORDING");
+            title.setForeground(Color.WHITE);
+            title.setFont(new Font("Segoe UI", Font.BOLD, 13));
+            countdown.setForeground(Color.WHITE);
+            countdown.setFont(new Font("Segoe UI", Font.BOLD, 12));
+            JPanel text = new JPanel(new BorderLayout(0, 2));
+            text.setOpaque(false);
+            text.add(title, BorderLayout.NORTH);
+            text.add(countdown, BorderLayout.SOUTH);
+            JButton stop = new JButton("Stop recording");
+            stop.setForeground(Color.WHITE);
+            stop.setBackground(new Color(185, 28, 28));
+            stop.setFocusPainted(false);
+            stop.addActionListener(event -> stopAction.run());
+            stop.setFont(new Font("Segoe UI", Font.BOLD, 13));
+            panel.add(text, BorderLayout.CENTER);
+            panel.add(stop, BorderLayout.EAST);
+            frame.add(panel);
+            updateCountdown(recorder);
+            countdownTimer = new Timer(1000, event -> updateCountdown(recorder));
+            countdownTimer.start();
+            frame.pack();
+            repositionTimer = new Timer(500, event -> position(window));
+            repositionTimer.start();
+            position(window);
+            frame.setVisible(true);
+        }
+
+        private void updateCountdown(LiveTestRecorder recorder) {
+            countdown.setText(recorder.remainingSeconds() + " seconds remaining");
+        }
+
+        private void position(LiveTestRecorder.WindowInfo window) {
+            LiveTestRecorder.windowBounds(window).ifPresent(bounds ->
+                    frame.setLocation(bounds.x + Math.max(0, bounds.width - frame.getWidth() - 12), bounds.y + 12));
+        }
+
+        void close() {
+            repositionTimer.stop();
+            countdownTimer.stop();
+            frame.dispose();
         }
     }
 

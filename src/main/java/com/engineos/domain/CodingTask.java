@@ -38,6 +38,29 @@ public record CodingTask(
                 unavailable. Do not close or terminate the existing Desktop.
                 """
                 : "";
+        String investigationBoundary = policy != null
+                && (!policy.workspaceModificationAllowed() || policy.phase() == ExecutionPhase.INVESTIGATION)
+                ? """
+
+                NON-MODIFYING INVESTIGATION BOUNDARY
+                Do not write, create, delete, rename, move, patch, format, or otherwise modify any file,
+                directory, repository metadata, process state, or other workspace state. Do not invoke
+                any write tool, file-editing tool, or command that can cause a write; use read-only
+                inspection tools only.
+                This prohibition is absolute, even if a change appears useful or is suggested by the task.
+                """
+                + (policy.phase() == ExecutionPhase.INVESTIGATION
+                ? """
+
+                REQUIRED INVESTIGATION FINDINGS REPORT
+                End with a structured report containing exactly these sections:
+                PRODUCTION CALL PATH (file, method, and line)
+                FAILING CONDITION (the precise condition that fails)
+                TEST/LIVE PATH DIFFERENCE (why tests pass while the live path fails, if evidenced;
+                otherwise state that it was not evidenced)
+                """
+                : "")
+                : "";
         return engineeringTask.intent()
                 + "\n\nHUMAN-APPROVED ENGINEERING TASK\n"
                 + engineeringTask.proposalText()
@@ -61,6 +84,7 @@ public record CodingTask(
                 of your own process, and never create a self-referential process wait. Perform only the
                 requested engineering task and bounded task-specific verification.
                 """
-                + verificationBoundary;
+                + verificationBoundary
+                + investigationBoundary;
     }
 }

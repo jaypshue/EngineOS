@@ -217,6 +217,10 @@ class EngineeringSessionRunnerTest {
         assertEquals("class Main {}\n", restored.replace("\r\n", "\n"),
                 "restored content: " + restored.replace("\n", "\\n"));
         assertEquals("BOUNDARY_VIOLATION", result.engineeringResult().control().termination());
+        assertEquals(EngineeringSessionRunner.SessionState.FAILED, result.state());
+        assertTrue(result.detail().contains("violated the investigation constraint"));
+        assertTrue(result.engineeringResult().assessment().keyFinding()
+                .contains("violated the investigation constraint"));
         assertTrue(result.engineeringResult().changes().modifiedFiles().contains("src/Main.java"));
         assertTrue(result.activity().stream().anyMatch(value -> value.contains("BOUNDARY VIOLATION")));
         assertTrue(result.activity().stream().anyMatch(value -> value.contains("src/Main.java")));

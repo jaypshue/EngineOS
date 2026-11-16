@@ -264,8 +264,9 @@ public final class EngineeringSessionRunner {
                         + (restore.errors().isEmpty() ? "" : "; restore errors: " + restore.errors()), activitySink);
                 sourceControlAfter = git.snapshot(prepared.project);
                 return failure(prepared.runId, prepared.startedAt, prepared.project, prepared.prompt,
-                        prepared.selectedModel, "Non-modifying request violated the workspace boundary; "
-                                + "changes were automatically restored: " + violationFiles,
+                        prepared.selectedModel, "Coding Agent violated the investigation constraint: "
+                                + "non-modifying request changed workspace files; changes were automatically restored: "
+                                + violationFiles,
                         coding, null, prepared.activities, null, stateSink, control, finalChanges,
                         prepared.sourceControlBefore, sourceControlAfter);
             }

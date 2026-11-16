@@ -57,7 +57,15 @@ public record EngineeringAssessment(
                 && verificationEvidencePresent(record);
         String evidenceStatus = sufficient ? "SUFFICIENT" : "INSUFFICIENT";
         String diagnostic = diagnostic(record);
+        String codingFindings = codingAgentFindings(record);
         String finding = keyFinding(implementation, verificationStatus, diagnostic);
+        if (isInvestigation(record) && !codingFindings.isBlank()) {
+            finding = codingFindings;
+        }
+        if (record != null && record.engineeringResult() != null
+                && record.engineeringResult().contains("violated the investigation constraint")) {
+            finding = "Coding Agent violated the investigation constraint: workspace changes were detected and restored.";
+        }
         var uncertainties = new ArrayList<String>();
         if (!record.semanticResultAvailable()) {
             uncertainties.add("Semantic result unavailable.");
@@ -81,7 +89,7 @@ public record EngineeringAssessment(
                 : "Resolve the recorded verification gap, then rerun: " + record.verificationCommand();
         return new EngineeringAssessment(
                 implementation, verificationStatus, evidenceStatus, finding,
-                changes(record), verification(record), evidence(record), uncertainties, nextAction);
+                changes(record), verification(record), evidence(record, codingFindings), uncertainties, nextAction);
     }
 
     private static String keyFinding(String implementation, String verification, String diagnostic) {
@@ -115,13 +123,33 @@ public record EngineeringAssessment(
                 + diagnostics(record);
     }
 
-    private static String evidence(EngineeringHistoryRecord record) {
-        return "Semantic result: " + (record.semanticResultComplete() ? "complete"
+    private static String evidence(EngineeringHistoryRecord record, String codingFindings) {
+        String evidence = "Semantic result: " + (record.semanticResultComplete() ? "complete"
                 : record.semanticResultAvailable() ? "incomplete" : "unavailable")
                 + "\nObservation: " + value(record.observationStatus())
                 + "\nObservation available: " + record.observationAvailable()
                 + "\nAcceptance criteria: " + acceptanceCriteria(record)
                 + "\nBehavioral evidence captured: " + verificationEvidencePresent(record);
+        return codingFindings.isBlank() ? evidence
+                : evidence + "\nCoding-agent findings:\n" + codingFindings;
+    }
+
+    private static boolean isInvestigation(EngineeringHistoryRecord record) {
+        return record != null
+                && com.engineos.domain.ExecutionPhase.INVESTIGATION
+                == com.engineos.domain.ExecutionPolicy.forRequest(
+                        EngineeringRequest.parse(record.engineeringRequest())).phase();
+    }
+
+    private static String codingAgentFindings(EngineeringHistoryRecord record) {
+        if (record == null || record.engineeringResult() == null) {
+            return "";
+        }
+        String marker = "CODING AGENT FINDINGS";
+        int markerIndex = record.engineeringResult().indexOf(marker);
+        return markerIndex < 0 ? "" : record.engineeringResult()
+                .substring(markerIndex + marker.length())
+                .trim();
     }
 
     private static boolean verificationEvidencePresent(EngineeringHistoryRecord record) {

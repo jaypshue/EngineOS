@@ -101,4 +101,23 @@ class CopilotCoderAgentTest {
         assertTrue(verificationPrompt.contains("do not launch another desktop"));
         assertTrue(verificationPrompt.contains("fail fast"));
     }
+
+    @Test
+    void investigationPromptForbidsWritesAndRequiresStructuredFindings() {
+        var task = new com.engineos.domain.EngineeringTask(
+                "Investigate the request", "Investigate the existing implementation.", "");
+        task.approve();
+
+        String prompt = new com.engineos.domain.CodingTask(task, java.util.List.of())
+                .executionPrompt(com.engineos.domain.ExecutionPolicy.defaults(
+                        com.engineos.domain.ExecutionPhase.INVESTIGATION))
+                .replaceAll("\\s+", " ")
+                .toLowerCase();
+
+        assertTrue(prompt.contains("do not write, create, delete, rename, move, patch"));
+        assertTrue(prompt.contains("do not invoke any write tool"));
+        assertTrue(prompt.contains("production call path (file, method, and line)"));
+        assertTrue(prompt.contains("failing condition"));
+        assertTrue(prompt.contains("test/live path difference"));
+    }
 }
