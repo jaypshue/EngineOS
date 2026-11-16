@@ -138,6 +138,12 @@ public final class ObservationWindow {
     private final JComboBox<String> model = new JComboBox<>();
     private final JComboBox<String> targetSelector = new JComboBox<>();
     private final JPanel onboardingPanel = new JPanel(new BorderLayout(16, 12));
+    private final JPanel workspaceEditorPanel = new JPanel();
+    private final JPanel workspaceSummaryPanel = new JPanel(new BorderLayout(12, 0));
+    private final JLabel workspaceSummaryLabel = new JLabel();
+    private final JButton workspaceChangeButton = new JButton("SHOW WORKSPACE");
+    private final JButton workspaceDoneButton = new JButton("HIDE WORKSPACE");
+    private final JLabel proposalProgressBanner = new JLabel();
     private final OnboardingPreferences onboarding = new OnboardingPreferences();
     private final JFrame frame = new JFrame("EngineOS");
     private final DesktopRequestLifecycle requestLifecycle = new DesktopRequestLifecycle();
@@ -147,6 +153,7 @@ public final class ObservationWindow {
     private GitSnapshot currentGitSnapshot;
     private Path currentGitWorkspace;
     private boolean preflightExpanded;
+    private boolean workspacePickerExpanded;
     private String serviceError;
     private int liveActivityCount;
     private Timer serviceRetryTimer;
@@ -307,6 +314,8 @@ public final class ObservationWindow {
         styleSecondaryButton(refreshSourceControlButton);
         styleSecondaryButton(historyButton);
         styleSecondaryButton(browseButton);
+        styleSecondaryButton(workspaceChangeButton);
+        styleSecondaryButton(workspaceDoneButton);
         styleSecondaryButton(codingAgent);
         styleTextField(projectField);
         styleTextArea(promptArea);
@@ -425,6 +434,14 @@ public final class ObservationWindow {
                 updateRequestValidation();
                 updateVerificationPlan();
                 invalidateCurrentRequestPresentation();
+            }
+        });
+        promptArea.addFocusListener(new java.awt.event.FocusAdapter() {
+            @Override
+            public void focusGained(java.awt.event.FocusEvent event) {
+                if (DEFAULT_INVESTIGATION_REQUEST.equals(promptArea.getText())) {
+                    SwingUtilities.invokeLater(promptArea::selectAll);
+                }
             }
         });
         updateRequestValidation();
@@ -586,6 +603,16 @@ public final class ObservationWindow {
         footerStack.setOpaque(false);
         footerStack.setLayout(new javax.swing.BoxLayout(
                 footerStack, javax.swing.BoxLayout.Y_AXIS));
+        proposalProgressBanner.setFont(new Font("Segoe UI", Font.BOLD, 13));
+        proposalProgressBanner.setForeground(new Color(254, 243, 199));
+        proposalProgressBanner.setOpaque(true);
+        proposalProgressBanner.setBackground(new Color(39, 31, 18));
+        proposalProgressBanner.setBorder(new CompoundBorder(
+                new MatteBorder(0, 3, 0, 0, ACTIVE_AMBER_BRIGHT),
+                new EmptyBorder(10, 12, 10, 12)));
+        proposalProgressBanner.setVisible(false);
+        footerStack.add(proposalProgressBanner);
+        footerStack.add(javax.swing.Box.createVerticalStrut(8));
         footerStack.add(onboardingPanel);
         footerStack.add(lower);
         requestFooter.add(footerStack, BorderLayout.NORTH);
@@ -628,9 +655,21 @@ public final class ObservationWindow {
         projectActions.add(gitButton);
         projectActions.add(historyButton);
         projectRow.add(projectActions, BorderLayout.EAST);
-        controls.add(projectRow);
-
-        controls.add(javax.swing.Box.createVerticalStrut(8));
+        workspaceEditorPanel.setOpaque(false);
+        workspaceEditorPanel.setLayout(new javax.swing.BoxLayout(
+                workspaceEditorPanel, javax.swing.BoxLayout.Y_AXIS));
+        var workspaceEditorHeading = new JPanel(new BorderLayout(8, 0));
+        workspaceEditorHeading.setOpaque(false);
+        workspaceEditorHeading.add(label("WORKSPACE SETTINGS", SECTION_FONT, ACCENT), BorderLayout.WEST);
+        workspaceDoneButton.addActionListener(event -> {
+            workspacePickerExpanded = false;
+            updateWorkspaceState();
+        });
+        workspaceEditorHeading.add(workspaceDoneButton, BorderLayout.EAST);
+        workspaceEditorPanel.add(workspaceEditorHeading);
+        workspaceEditorPanel.add(javax.swing.Box.createVerticalStrut(8));
+        workspaceEditorPanel.add(projectRow);
+        workspaceEditorPanel.add(javax.swing.Box.createVerticalStrut(8));
 
         var targetDetails = new JPanel(new GridLayout(1, 2, 16, 0));
         targetDetails.setOpaque(true);
@@ -654,9 +693,8 @@ public final class ObservationWindow {
         targetSelection.setPreferredSize(new Dimension(190, 0));
         targetPanel.add(targetSelection, BorderLayout.EAST);
         targetDetails.add(targetPanel);
-        controls.add(targetDetails);
-
-        controls.add(javax.swing.Box.createVerticalStrut(8));
+        workspaceEditorPanel.add(targetDetails);
+        workspaceEditorPanel.add(javax.swing.Box.createVerticalStrut(8));
 
         var sourceRow = new JPanel(new BorderLayout(8, 0));
         sourceRow.setOpaque(true);
@@ -667,9 +705,27 @@ public final class ObservationWindow {
         sourceRow.setBorder(new CompoundBorder(
                 new LineBorder(new Color(38, 68, 78), 1, true),
                 new EmptyBorder(8, 12, 8, 12)));
-        controls.add(sourceRow);
+        workspaceEditorPanel.add(sourceRow);
 
-        controls.add(javax.swing.Box.createVerticalStrut(8));
+        workspaceSummaryPanel.setOpaque(true);
+        workspaceSummaryPanel.setBackground(SURFACE_RAISED);
+        workspaceSummaryPanel.setBorder(new CompoundBorder(
+                new LineBorder(new Color(38, 68, 78), 1, true),
+                new EmptyBorder(9, 12, 9, 12)));
+        workspaceSummaryLabel.setFont(new Font("Segoe UI", Font.BOLD, 13));
+        workspaceSummaryLabel.setForeground(TEXT);
+        workspaceSummaryPanel.add(workspaceSummaryLabel, BorderLayout.CENTER);
+        workspaceChangeButton.addActionListener(event -> {
+            workspacePickerExpanded = true;
+            updateWorkspaceState();
+        });
+        workspaceSummaryPanel.add(workspaceChangeButton, BorderLayout.EAST);
+        controls.add(workspaceSummaryPanel);
+        controls.add(workspaceEditorPanel);
+        boolean validWorkspace = isValidWorkspace();
+        workspaceSummaryPanel.setVisible(validWorkspace && !workspacePickerExpanded);
+        workspaceEditorPanel.setVisible(!validWorkspace || workspacePickerExpanded);
+        controls.add(javax.swing.Box.createVerticalStrut(10));
 
         var agentModelRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 16, 0));
         agentModelRow.setOpaque(false);
@@ -700,6 +756,10 @@ public final class ObservationWindow {
     private JPanel buildActionRow() {
         var actions = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 0));
         actions.setOpaque(false);
+        startButton.setFont(new Font("Segoe UI", Font.BOLD, 14));
+        startButton.setBorder(new CompoundBorder(
+                new LineBorder(ACCENT, 1, true),
+                new EmptyBorder(13, 22, 13, 22)));
         actions.add(startButton);
         actions.add(cancelButton);
         actions.add(sendButton);
@@ -1042,11 +1102,49 @@ public final class ObservationWindow {
         historyButton.setEnabled(valid);
         gitButton.setEnabled(valid);
         onboardingPanel.setVisible(!valid);
-        onboardingPanel.getParent().revalidate();
-        onboardingPanel.getParent().repaint();
+        workspaceSummaryLabel.setText(workspaceSummaryText(valid));
+        workspaceSummaryPanel.setVisible(valid && !workspacePickerExpanded);
+        workspaceEditorPanel.setVisible(!valid || workspacePickerExpanded);
+        if (onboardingPanel.getParent() != null) {
+            onboardingPanel.getParent().revalidate();
+            onboardingPanel.getParent().repaint();
+        }
+        if (workspaceSummaryPanel.getParent() != null) {
+            workspaceSummaryPanel.getParent().revalidate();
+            workspaceSummaryPanel.getParent().repaint();
+        }
         refreshSourceControl();
         refreshSourceControlButton.setEnabled(isValidWorkspace());
         updateVerificationPlan();
+    }
+
+    private String workspaceSummaryText(boolean valid) {
+        if (!valid) {
+            return "<html><b>WORKSPACE</b><br><font color='#94A3B8'>Select a workspace to begin.</font></html>";
+        }
+        String path = escape(projectField.getText().trim());
+        if (currentGitSnapshot == null) {
+            return "<html><font color='#E5E7EB'>" + path
+                    + "</font> <font color='#CBD5E1'>&middot; Reading Git status...</font></html>";
+        }
+        if (!currentGitSnapshot.repository()) {
+            return "<html><font color='#E5E7EB'>" + path
+                    + "</font> <font color='#CBD5E1'>&middot; No Git repository detected</font></html>";
+        }
+        String branch = currentGitSnapshot.branch().isBlank()
+                ? "branch unavailable" : escape(currentGitSnapshot.branch());
+        String shortSha = currentGitSnapshot.headSha().isBlank()
+                ? "" : " · " + escape(currentGitSnapshot.headSha().substring(
+                        0, Math.min(7, currentGitSnapshot.headSha().length())));
+        boolean clean = currentGitSnapshot.clean();
+        String state = clean ? "CLEAN" : "CHANGED";
+        String stateColor = clean ? "#45D483" : "#FBBF24";
+        String stats = clean ? "" : " · " + currentGitSnapshot.changes().size() + " files · +"
+                + currentGitSnapshot.linesAdded() + "/-" + currentGitSnapshot.linesRemoved();
+        return "<html><font color='#E5E7EB'><b>" + path + "</b></font>"
+                + " <font color='#CBD5E1'>&middot; <b>" + branch + shortSha
+                + " &middot; </font><font color='" + stateColor + "'><b>" + state + "</b></font>"
+                + "<font color='#CBD5E1'>" + stats + "</font></html>";
     }
 
     private void refreshSourceControl() {
@@ -1109,6 +1207,7 @@ public final class ObservationWindow {
             sourceControlLabel.setToolTipText(null);
             sourceControlLabel.setText("<html><font color='#FBBF24'><b>No Git repository detected</b></font>"
                     + "<br><font color='#94A3B8'>This is valid; EngineOS will continue without Git baseline evidence.</font></html>");
+            workspaceSummaryLabel.setText(workspaceSummaryText(isValidWorkspace()));
             renderPreflight();
             return;
         }
@@ -1132,6 +1231,7 @@ public final class ObservationWindow {
                 + changes + "<br><font color='#94A3B8'>Repository: "
                 + escape(compactPath(snapshot.repositoryRoot().toString(), 72)) + " &nbsp; Scope: " + scope
                 + "</font><br><font color='" + color + "'>" + implications + "</font></html>");
+        workspaceSummaryLabel.setText(workspaceSummaryText(isValidWorkspace()));
         renderPreflight();
     }
 
@@ -1156,7 +1256,7 @@ public final class ObservationWindow {
         String project = projectField.getText().trim();
         Path workspace;
         try {
-            workspace = project.isBlank() ? null : Path.of(project);
+            workspace = project.isBlank() ? null : Path.of(project).toAbsolutePath().normalize();
         } catch (RuntimeException exception) {
             preflightLabel.setText(preflightHtml(
                     "\uD83D\uDD34 NOT READY", ERROR,
@@ -1172,17 +1272,20 @@ public final class ObservationWindow {
                 ? "Investigation"
                 : request.toLowerCase().contains("verif") ? "Verification" : "Code Change";
         var plan = workspaceValid ? sessions.verificationPlan(workspace, request) : null;
-        boolean verificationAvailable = plan != null && plan.resolved() && plan.targetKind() != null;
+        boolean verificationAvailable = plan != null && plan.resolved();
         boolean sourceLoaded = currentGitSnapshot != null
                 && workspace.equals(currentGitWorkspace);
-        boolean ready = workspaceValid && requestValid && verificationAvailable
+        boolean ready = workspaceValid && requestValid
                 && sourceLoaded && codingAgent.getSelectedItem() != null
                 && model.getSelectedItem() != null;
         boolean review = ready && !currentGitSnapshot.clean();
         String overall = review ? "\uD83D\uDFE1 REVIEW" : ready ? "\uD83D\uDFE2 READY" : "\uD83D\uDD34 NOT READY";
         Color overallColor = review ? ACTIVE_AMBER : ready ? SUCCESS : ERROR;
         String overallSummary = review ? "Existing changes detected"
-                : ready ? "Ready to submit" : "Required state unavailable";
+                : ready ? "Ready to submit"
+                : preflightBlocker(requestValid, workspaceValid, verificationAvailable,
+                        sourceLoaded, codingAgent.getSelectedItem() != null,
+                        model.getSelectedItem() != null);
 
         String targetName = workspace == null || project.isBlank()
                 ? "Unavailable"
@@ -1224,7 +1327,8 @@ public final class ObservationWindow {
         String verification = plan == null || !plan.resolved()
                 ? "\u26A0 Verification configuration unavailable"
                 : verificationAvailable
-                ? "\u2713 Available &nbsp; Target: " + escape(plan.targetKind().name())
+                ? "\u2713 Available &nbsp; Target: "
+                        + (plan.targetKind() == null ? "WORKSPACE DEFAULT" : escape(plan.targetKind().name()))
                 : "\u26A0 Limited &nbsp; No separate behavioral verification target";
         String reviewNote = review
                 ? "<br><font color='#FBBF24'>Existing changes detected before this request.</font>" : "";
@@ -1248,6 +1352,34 @@ public final class ObservationWindow {
     private static String preflightHtml(String overall, Color color, String section, String detail) {
         return "<html><font color='" + colorHex(color) + "'><b>" + overall + "</b></font>"
                 + "<br><br><b>" + section + "</b><br>" + detail + "</html>";
+    }
+
+    private static String preflightBlocker(
+            boolean requestValid,
+            boolean workspaceValid,
+            boolean verificationAvailable,
+            boolean sourceLoaded,
+            boolean codingAgentAvailable,
+            boolean modelAvailable) {
+        if (!workspaceValid) {
+            return "Select a valid workspace";
+        }
+        if (!requestValid) {
+            return "Enter an engineering request";
+        }
+        if (!sourceLoaded) {
+            return "Reading Git status";
+        }
+        if (!verificationAvailable) {
+            return "Verification plan unavailable";
+        }
+        if (!codingAgentAvailable) {
+            return "Coding agent unavailable";
+        }
+        if (!modelAvailable) {
+            return "Select a model";
+        }
+        return "Required state unavailable";
     }
 
     private static String compact(String value) {
@@ -1358,6 +1490,7 @@ public final class ObservationWindow {
             // Keep the native chooser usable when the manually entered path is invalid.
         }
         if (chooser.showOpenDialog(frame) == JFileChooser.APPROVE_OPTION) {
+            workspacePickerExpanded = false;
             projectField.setText(chooser.getSelectedFile().getAbsolutePath());
             updateVerificationPlan();
         }
@@ -1445,6 +1578,11 @@ public final class ObservationWindow {
                 return;
             }
         }
+        proposalProgressBanner.setText("\u25CF  Preparing proposal\u2026 EngineOS is analyzing the request.");
+        proposalProgressBanner.setVisible(true);
+        proposalProgressBanner.getParent().revalidate();
+        proposalProgressBanner.getParent().repaint();
+        startButton.setText("PREPARING PROPOSAL\u2026");
         long generation = ++requestGeneration;
         String project = projectField.getText().trim();
         String prompt = promptArea.getText().trim();
@@ -1500,6 +1638,8 @@ public final class ObservationWindow {
                 }
                 try {
                     var proposal = get();
+                    proposalProgressBanner.setVisible(false);
+                    startButton.setText("SUBMIT ENGINEERING REQUEST");
                     requestLifecycle.serviceState(EngineOsService.ExecutionState.WAITING_FOR_APPROVAL);
                     requestStatus.setText(requestLifecycle.displayText());
                     requestStatus.setForeground(ACTIVE_AMBER);
@@ -1507,6 +1647,8 @@ public final class ObservationWindow {
                     showProposalDecision(proposal, generation);
                 } catch (Exception exception) {
                     Throwable cause = exception.getCause() == null ? exception : exception.getCause();
+                    proposalProgressBanner.setVisible(false);
+                    startButton.setText("SUBMIT ENGINEERING REQUEST");
                     requestLifecycle.serviceState(EngineOsService.ExecutionState.FAILED);
                     setActivityActive(false);
                     requestStatus.setText("Request failed/terminated: " + cause.getMessage());
@@ -1613,6 +1755,10 @@ public final class ObservationWindow {
             public void windowClosing(WindowEvent event) {
                 pane.setValue(rejectButton);
             }
+        });
+        rejectButton.addActionListener(event -> {
+            pane.setValue(rejectButton);
+            dialog.dispose();
         });
         dialog.getContentPane().setBackground(SURFACE);
         dialog.getContentPane().add(helper, BorderLayout.SOUTH);
