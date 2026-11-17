@@ -63,6 +63,8 @@ final class EngineeringProposalContext {
 
     static String constraints(WorkspaceContext workspace, EngineeringRequest request) {
         var policy = ExecutionPolicy.forRequest(request);
+        String boundary = request.sections().getOrDefault("BOUNDARY",
+                "No additional user-declared boundary.");
         return "Authoritative EngineOS boundary: phase=" + policy.phase()
                 + "; " + (policy.workspaceModificationAllowed()
                 ? "only request-related changes in the selected workspace may be proposed."
@@ -72,7 +74,18 @@ final class EngineeringProposalContext {
                 + "\nGit baseline: branch=" + workspace.gitBranch()
                 + ", clean=" + workspace.gitWorktreeClean()
                 + "\nHuman constraints: " + request.sections().getOrDefault("CONSTRAINTS",
-                "All restrictions in the original request remain binding.");
+                "All restrictions in the original request remain binding.")
+                + "\nDeclared request boundary (binding; changed files must remain within it): " + boundary
+                + "\nProject rules are lower priority than the human request and EngineOS safety boundaries."
+                + rules(workspace);
+    }
+
+    static String rules(WorkspaceContext workspace) {
+        var rules = workspace.rules();
+        return rules.present()
+                ? "\n<project_rules path=\"" + rules.path() + "\" sha256=\"" + rules.shortSha256()
+                + "\">\n" + rules.content() + "\n</project_rules>"
+                : "\n<project_rules>none loaded</project_rules>";
     }
 
     static String verification(WorkspaceContext workspace) {

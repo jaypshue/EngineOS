@@ -56,6 +56,8 @@ public final class LlmEngineerAgent implements EngineerAgent {
                             + "\nSuggested additional constraints:\n" + draft.constraints(), verification),
                     "AI-generated proposal: " + provider.providerId() + "/" + provider.modelId()
                             + ". Inferred from request and file inventory; not verified.");
+            task = new EngineeringTask(task.title(), task.intent(), task.rationale(), task.proposal(),
+                    task.proposalSource(), workspace.rules());
         } catch (ProposalGenerationException | JsonProcessingException | IllegalArgumentException exception) {
             if (Thread.currentThread().isInterrupted()) {
                 throw new IllegalStateException("Engineer proposal interrupted", exception);
@@ -100,7 +102,8 @@ public final class LlmEngineerAgent implements EngineerAgent {
                 + EngineeringProposalContext.constraints(workspace, EngineeringRequest.parse(model.humanIntent()))
                 + "\n<workspace_inventory>\n" + EngineeringProposalContext.describe(workspace)
                 + "\n</workspace_inventory>\n<human_request>\n" + model.humanIntent()
-                + "\n</human_request>";
+                + "\n</human_request>\nPROJECT RULES (lower priority than request and EngineOS boundaries):"
+                + EngineeringProposalContext.rules(workspace);
     }
 
     private static String jsonObject(String response) {

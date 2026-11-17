@@ -164,6 +164,7 @@ public final class EngineeringSessionRunner {
         var model = new EngineeringModel(prompt);
         var task = workflow.receiveIntent(workspace, prompt, model);
         var policy = ExecutionPolicy.forRequest(EngineeringRequest.parse(prompt));
+        var boundary = com.engineos.domain.RequestBoundary.from(EngineeringRequest.parse(prompt));
         var declaration = VerificationTargetDeclaration.parse(prompt);
         if (!declaration.error().isBlank()) {
             throw new IllegalArgumentException(declaration.error());
@@ -179,11 +180,15 @@ public final class EngineeringSessionRunner {
                 model,
                 task,
                 policy,
+                boundary,
                 target,
                 sourceControlBaseline == null ? git.snapshot(project) : sourceControlBaseline,
                 WorkspaceSnapshot.capture(project));
         addActivity(prepared, "Engineering Task proposed (PROPOSED): " + task.title()
                 + "\n" + task.proposalText()
+                + "\nPROJECT RULES: " + (task.rulesSnapshot().present()
+                ? task.rulesSnapshot().path() + " SHA-256=" + task.rulesSnapshot().sha256()
+                + " Summary=" + task.rulesSnapshot().summary() : "none loaded")
                 + ". Awaiting explicit human approval.", activitySink);
         if (pendingSessions.putIfAbsent(requestId, prepared) != null) {
             throw new IllegalStateException("An Engineering Task has already been proposed for this request.");
@@ -239,23 +244,26 @@ public final class EngineeringSessionRunner {
             var finalChanges = WorkspaceChangeSummary.capture(prepared.project);
             boolean boundaryViolation = !policy.workspaceModificationAllowed()
                     && (!changedFiles.isEmpty() || !gitChangedFiles.isEmpty());
-            String termination = boundaryViolation ? "BOUNDARY_VIOLATION"
+            var changedPaths = java.util.stream.Stream.concat(
+                            changedFiles.stream().map(EngineeringSessionRunner::snapshotPath),
+                            gitChangedFiles.stream())
+                    .distinct()
+                    .sorted()
+                    .toList();
+            var declaredBoundaryViolations = prepared.boundary.violations(changedPaths);
+            boolean declaredBoundaryViolation = !declaredBoundaryViolations.isEmpty();
+            String termination = boundaryViolation || declaredBoundaryViolation ? "BOUNDARY_VIOLATION"
                     : coding.exitCode() == 124 ? "TIMED_OUT"
                     : coding.exitCode() == 125 ? "BOUNDARY_VIOLATION"
                     : coding.exitCode() == 130 ? "CANCELLED"
                     : coding.succeeded() ? "COMPLETED" : "FAILED";
             var control = new ExecutionControl(
                     policy.phase(), policy, prepared.executionStarted, Instant.now(), termination,
-                    boundaryViolation || coding.exitCode() == 125,
+                    boundaryViolation || declaredBoundaryViolation || coding.exitCode() == 125,
                     finalChanges == null ? changedFiles : finalChanges.modifiedFiles(), 0,
                     List.of(policy.phase()));
             if (boundaryViolation) {
-                var violationFiles = java.util.stream.Stream.concat(
-                                changedFiles.stream().map(EngineeringSessionRunner::snapshotPath),
-                                gitChangedFiles.stream())
-                        .distinct()
-                        .sorted()
-                        .toList();
+                var violationFiles = changedPaths;
                 var restore = git.restoreWorkspace(prepared.project, prepared.sourceControlBefore, sourceControlAfter);
                 addActivity(prepared, "BOUNDARY VIOLATION: non-modifying request changed "
                         + violationFiles + ". Automatically restored: " + restore.restoredFiles()
@@ -267,6 +275,16 @@ public final class EngineeringSessionRunner {
                         prepared.selectedModel, "Coding Agent violated the investigation constraint: "
                                 + "non-modifying request changed workspace files; changes were automatically restored: "
                                 + violationFiles,
+                        coding, null, prepared.activities, null, stateSink, control, finalChanges,
+                        prepared.sourceControlBefore, sourceControlAfter);
+            }
+            if (!declaredBoundaryViolations.isEmpty()) {
+                String violationMessage = "DECLARED BOUNDARY VIOLATION: the Coding Agent changed files outside "
+                        + "the approved boundary: " + declaredBoundaryViolations
+                        + ". The result is blocked and requires review.";
+                addActivity(prepared, violationMessage, activitySink);
+                return failure(prepared.runId, prepared.startedAt, prepared.project, prepared.prompt,
+                        prepared.selectedModel, violationMessage,
                         coding, null, prepared.activities, null, stateSink, control, finalChanges,
                         prepared.sourceControlBefore, sourceControlAfter);
             }
@@ -391,7 +409,12 @@ public final class EngineeringSessionRunner {
                 prepared.runId, prepared.task.id().toString(), prepared.task.title(), details.goal(), details.scope(),
                 constraints, prepared.task.rationale(), allowedActions, prepared.task.status(),
                 details.outOfScope(), details.acceptanceCriteria(), details.verificationApproach(),
-                prepared.task.proposalSource(), prepared.policy.nonModifying());
+                prepared.task.proposalSource(), prepared.policy.nonModifying(),
+                prepared.task.rulesSnapshot().path() == null ? "" : prepared.task.rulesSnapshot().path().toString(),
+                prepared.task.rulesSnapshot().sha256(), prepared.task.rulesSnapshot().summary(),
+                prepared.task.rulesSnapshot().content(),
+                com.engineos.domain.RequestBoundary.from(
+                        EngineeringRequest.parse(prepared.task.intent())).declaration());
     }
 
     private static String snapshotPath(String change) {
@@ -710,6 +733,7 @@ public final class EngineeringSessionRunner {
         private final EngineeringModel model;
         private final com.engineos.domain.EngineeringTask task;
         private final ExecutionPolicy policy;
+        private final com.engineos.domain.RequestBoundary boundary;
         private final VerificationTarget verificationTarget;
         private GitSnapshot sourceControlBefore;
         private WorkspaceSnapshot baseline;
@@ -726,6 +750,7 @@ public final class EngineeringSessionRunner {
                 EngineeringModel model,
                 com.engineos.domain.EngineeringTask task,
                 ExecutionPolicy policy,
+                com.engineos.domain.RequestBoundary boundary,
                 VerificationTarget verificationTarget,
                 GitSnapshot sourceControlBefore,
                 WorkspaceSnapshot baseline) {
@@ -738,6 +763,7 @@ public final class EngineeringSessionRunner {
             this.model = model;
             this.task = task;
             this.policy = policy;
+            this.boundary = boundary;
             this.verificationTarget = verificationTarget;
             this.sourceControlBefore = sourceControlBefore;
             this.baseline = baseline;

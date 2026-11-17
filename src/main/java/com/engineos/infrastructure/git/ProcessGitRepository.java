@@ -173,6 +173,30 @@ public final class ProcessGitRepository implements GitRepository {
     }
 
     @Override
+    public GitStageResult stageAll(Path workspace) {
+        GitStatus status = status(workspace);
+        if (!status.repository()) {
+            return new GitStageResult(false, "", status.error().isBlank()
+                    ? "Workspace is not a Git repository." : status.error());
+        }
+        var result = run(workspace, List.of("add", "--all", "--", "."));
+        return new GitStageResult(result.succeeded(), result.standardOutput(),
+                result.succeeded() ? "" : diagnostic(result));
+    }
+
+    @Override
+    public GitPushResult push(Path workspace) {
+        GitStatus status = status(workspace);
+        if (!status.repository()) {
+            return new GitPushResult(false, "", status.error().isBlank()
+                    ? "Workspace is not a Git repository." : status.error());
+        }
+        var result = run(workspace, List.of("push"));
+        return new GitPushResult(result.succeeded(), result.standardOutput(), result.succeeded()
+                ? "" : diagnostic(result));
+    }
+
+    @Override
     public GitRestoreResult restoreWorkspace(Path workspace, GitSnapshot baseline, GitSnapshot current) {
         if (current == null || !current.repository() || baseline == null || !baseline.repository()) {
             return GitRestoreResult.unavailable();

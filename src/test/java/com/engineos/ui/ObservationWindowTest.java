@@ -14,6 +14,37 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ObservationWindowTest {
     @Test
+    void proposalBannerFillsWidthAndKeepsTextTwelvePixelsFromLeft() throws Exception {
+        javax.swing.SwingUtilities.invokeAndWait(() -> {
+            var footer = new javax.swing.JPanel(new java.awt.BorderLayout());
+            var banner = ObservationWindow.createProposalProgressBanner();
+            assertFalse(banner.isVisible());
+            footer.add(banner, java.awt.BorderLayout.NORTH);
+            var siblings = new javax.swing.JPanel();
+            siblings.setLayout(new javax.swing.BoxLayout(siblings, javax.swing.BoxLayout.Y_AXIS));
+            siblings.add(new javax.swing.JLabel("Other footer content"));
+            footer.add(siblings, java.awt.BorderLayout.CENTER);
+            banner.setVisible(true);
+            for (int width : new int[]{700, 1040, 1600}) {
+                footer.setSize(width, 300);
+                footer.doLayout();
+                banner.doLayout();
+                var layout = (java.awt.BorderLayout) banner.getLayout();
+                var accent = layout.getLayoutComponent(java.awt.BorderLayout.WEST);
+                var message = (javax.swing.JLabel) layout.getLayoutComponent(java.awt.BorderLayout.CENTER);
+                assertEquals(0, banner.getX());
+                assertEquals(width, banner.getWidth());
+                assertEquals(0, accent.getX());
+                assertEquals(4, accent.getWidth());
+                assertEquals(12, message.getX());
+                assertEquals(0, message.getInsets().left);
+                assertEquals(javax.swing.JLabel.LEFT, message.getHorizontalAlignment());
+                assertTrue(message.getHeight() >= message.getPreferredSize().height);
+            }
+        });
+    }
+
+    @Test
     void completionRetainsActivityInsteadOfClearingIt() {
         assertEquals("Activity retained in Engineering History \u2014 2 events. Use HISTORY to review.",
                 ObservationWindow.activityRetentionText(List.of("Inspecting files", "Copilot completed.")));

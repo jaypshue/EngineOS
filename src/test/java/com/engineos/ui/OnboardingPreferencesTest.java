@@ -4,6 +4,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.awt.Dimension;
+import java.awt.Rectangle;
 import java.util.List;
 import java.util.UUID;
 import java.util.prefs.Preferences;
@@ -63,6 +65,19 @@ class OnboardingPreferencesTest {
             assertEquals("auto",
                     store.restoreModel(List.of("auto", "gpt-5.6-luna"), "auto"));
             assertEquals("fallback", store.restoreWorkspace("fallback"));
+        });
+    }
+
+    @Test
+    void windowBoundsArePersistedAcrossStoreInstances() throws Exception {
+        withPreferences(preferences -> {
+            var first = new OnboardingPreferences(preferences);
+            first.saveWindowBounds(new Rectangle(120, 80, 1200, 800));
+
+            var restored = new OnboardingPreferences(preferences)
+                    .restoreWindowBounds(new Rectangle(40, 0, 1040, 680), new Dimension(900, 600));
+
+            assertEquals(new Rectangle(120, 80, 1200, 800), restored);
         });
     }
 

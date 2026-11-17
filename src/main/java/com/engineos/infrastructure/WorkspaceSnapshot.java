@@ -24,9 +24,12 @@ public record WorkspaceSnapshot(List<String> relevantChanges) {
                     .start();
             if (!process.waitFor(10, TimeUnit.SECONDS)) {
                 process.destroyForcibly();
-                return new WorkspaceSnapshot(List.of("git status timed out"));
+                return captureFilesystem(root);
             }
             String output = new String(process.getInputStream().readAllBytes());
+            if (process.exitValue() != 0) {
+                return captureFilesystem(root);
+            }
             return new WorkspaceSnapshot(output.lines()
                     .map(String::trim)
                     .filter(line -> !line.isBlank())
@@ -39,6 +42,22 @@ public record WorkspaceSnapshot(List<String> relevantChanges) {
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
             return new WorkspaceSnapshot(List.of("workspace snapshot interrupted"));
+        }
+    }
+
+    private static WorkspaceSnapshot captureFilesystem(Path root) {
+        try (Stream<Path> paths = Files.walk(root)) {
+            return new WorkspaceSnapshot(paths
+                    .filter(Files::isRegularFile)
+                    .map(root::relativize)
+                    .map(Path::toString)
+                    .map(path -> path.replace('\\', '/'))
+                    .filter(WorkspaceSnapshot::isRelevantPath)
+                    .map(path -> "?? " + path + " | " + contentHash(root, path))
+                    .sorted()
+                    .toList());
+        } catch (IOException exception) {
+            return new WorkspaceSnapshot(List.of("workspace snapshot unavailable: " + exception.getMessage()));
         }
     }
 
@@ -55,7 +74,10 @@ public record WorkspaceSnapshot(List<String> relevantChanges) {
     }
 
     private static boolean isRelevant(String statusLine) {
-        String path = pathOf(statusLine);
+        return isRelevantPath(pathOf(statusLine));
+    }
+
+    private static boolean isRelevantPath(String path) {
         String normalized = path.replace('\\', '/');
         return normalized.startsWith("src/")
                 || normalized.equals("pom.xml")

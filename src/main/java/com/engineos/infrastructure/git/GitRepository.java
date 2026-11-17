@@ -21,6 +21,10 @@ public interface GitRepository {
 
     GitCommitResult commit(Path workspace, String message);
 
+    GitStageResult stageAll(Path workspace);
+
+    GitPushResult push(Path workspace);
+
     default GitRestoreResult restoreWorkspace(Path workspace, GitSnapshot baseline, GitSnapshot current) {
         return GitRestoreResult.unavailable();
     }

@@ -15,6 +15,7 @@ public final class EngineeringTask {
     private final String rationale;
     private final Proposal proposal;
     private final String proposalSource;
+    private final ProjectRules rulesSnapshot;
     private final Instant createdAt = Instant.now();
     private Status status = Status.PROPOSED;
 
@@ -23,16 +24,23 @@ public final class EngineeringTask {
                 "Unrelated changes and autonomous follow-up tasks.",
                 List.of("Address the requested outcome and report supporting evidence."),
                 "Preserve existing work and stay within the approved request.",
-                "Use relevant existing checks and report evidence gaps."), "Deterministic proposal.");
+                "Use relevant existing checks and report evidence gaps."), "Deterministic proposal.",
+                ProjectRules.NONE);
     }
 
     public EngineeringTask(String title, String intent, String rationale,
                            Proposal proposal, String proposalSource) {
+        this(title, intent, rationale, proposal, proposalSource, ProjectRules.NONE);
+    }
+
+    public EngineeringTask(String title, String intent, String rationale,
+                           Proposal proposal, String proposalSource, ProjectRules rulesSnapshot) {
         this.title = requireText(title, "Task title");
         this.intent = requireText(intent, "Task intent");
         this.rationale = rationale == null ? "" : rationale.trim();
         this.proposal = java.util.Objects.requireNonNull(proposal);
         this.proposalSource = requireText(proposalSource, "Proposal source");
+        this.rulesSnapshot = rulesSnapshot == null ? ProjectRules.NONE : rulesSnapshot;
     }
 
     public UUID id() { return id; }
@@ -41,10 +49,13 @@ public final class EngineeringTask {
     public String rationale() { return rationale; }
     public Proposal proposal() { return proposal; }
     public String proposalSource() { return proposalSource; }
+    public ProjectRules rulesSnapshot() { return rulesSnapshot; }
     public String proposalText() {
+        String boundary = RequestBoundary.from(EngineeringRequest.parse(intent)).declaration();
         return "Goal:\n" + proposal.goal()
                 + "\n\nIn scope:\n" + proposal.scope()
                 + "\n\nOut of scope:\n" + proposal.outOfScope()
+                + (boundary.isBlank() ? "" : "\n\nDeclared boundary:\n" + boundary)
                 + "\n\nAcceptance criteria:\n- " + String.join("\n- ", proposal.acceptanceCriteria())
                 + "\n\nConstraints:\n" + proposal.constraints()
                 + "\n\nRationale:\n" + rationale

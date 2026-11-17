@@ -54,7 +54,7 @@ public final class DeterministicEngineerAgent implements EngineerAgent {
                                 + "and autonomous follow-up tasks unless explicitly requested.",
                         criteria, EngineeringProposalContext.constraints(workspace, request),
                         section(request, "VERIFICATION", EngineeringProposalContext.verification(workspace))),
-                source);
+                source, workspace.rules());
         recordProposal(task, model);
         return task;
     }

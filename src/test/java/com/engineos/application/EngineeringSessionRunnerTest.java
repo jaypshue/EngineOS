@@ -227,6 +227,32 @@ class EngineeringSessionRunnerTest {
     }
 
     @Test
+    void blocksChangesOutsideDeclaredBoundaryAndReportsExactPaths() throws Exception {
+        Files.createDirectories(project.resolve("src"));
+        Files.writeString(project.resolve("src/Main.java"), "class Main {}\n");
+
+        var activities = new ArrayList<String>();
+        var runner = new EngineeringSessionRunner(
+                new BoundaryMutatingCoder(new CodingResult(0, "coded", "", Duration.ZERO)),
+                new RecordingObservationRunner(new ObservationRunner.ObservationResult(0, "must not run", "")));
+
+        var result = runApproved(runner, """
+                ENGINEOS_REQUEST_V1
+                Goal:
+                Update the allowed component.
+                BOUNDARY:
+                src/allowed/**
+                """, null, state -> { }, activities::add);
+
+        assertEquals(EngineeringSessionRunner.SessionState.FAILED, result.state());
+        assertTrue(result.detail().contains("DECLARED BOUNDARY VIOLATION"));
+        assertTrue(result.detail().contains("src/Main.java"));
+        assertTrue(result.activity().stream().anyMatch(value ->
+                value.contains("DECLARED BOUNDARY VIOLATION") && value.contains("src/Main.java")));
+        assertFalse(result.engineeringResult().control().termination().equals("COMPLETED"));
+    }
+
+    @Test
     void stopsAtFailedCodingWithoutRunningObservation() {
         var observation = new RecordingObservationRunner(
                 new ObservationRunner.ObservationResult(0, "package", ""));
@@ -547,6 +573,23 @@ class EngineeringSessionRunnerTest {
             try {
                 Files.writeString(workspace.root().resolve("src/Main.java"),
                         "class Main {\n  // changed\n}\n");
+            } catch (Exception exception) {
+                throw new AssertionError(exception);
+            }
+            return super.execute(workspace, task);
+        }
+    }
+
+    private static final class BoundaryMutatingCoder extends StubCoder {
+        private BoundaryMutatingCoder(CodingResult result) {
+            super(result);
+        }
+
+        @Override
+        public CodingResult execute(WorkspaceContext workspace, CodingTask task) {
+            try {
+                Files.writeString(workspace.root().resolve("src/Main.java"),
+                        "class Main {\n  // outside declared boundary\n}\n");
             } catch (Exception exception) {
                 throw new AssertionError(exception);
             }

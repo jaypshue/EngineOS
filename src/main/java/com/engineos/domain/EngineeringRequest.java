@@ -52,7 +52,7 @@ public record EngineeringRequest(
             String candidate = trimmed.substring(0, trimmed.length() - 1).trim().toUpperCase();
             return switch (candidate) {
                 case "GOAL", "CONTEXT", "TASK", "ACCEPTANCE CRITERIA", "CONSTRAINTS",
-                        "VERIFICATION", "EVIDENCE REQUIRED" -> candidate;
+                        "VERIFICATION", "EVIDENCE REQUIRED", "BOUNDARY" -> candidate;
                 default -> null;
             };
         }

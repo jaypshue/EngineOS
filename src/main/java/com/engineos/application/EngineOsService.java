@@ -93,16 +93,32 @@ public interface EngineOsService {
             List<String> acceptanceCriteria,
             String verificationApproach,
             String proposalSource,
-            boolean nonModifying) {
+            boolean nonModifying,
+            String rulesPath,
+            String rulesSha256,
+            String rulesSummary,
+            String rulesContent,
+            String declaredBoundary) {
         public TaskProposal {
             acceptanceCriteria = acceptanceCriteria == null ? List.of() : List.copyOf(acceptanceCriteria);
         }
 
         public TaskProposal(String requestId, String taskId, String title, String goal, String scope,
                             String constraints, String rationale, String allowedActions,
+                            EngineeringTask.Status status, String outOfScope,
+                            List<String> acceptanceCriteria, String verificationApproach,
+                            String proposalSource, boolean nonModifying, String rulesPath,
+                            String rulesSha256, String rulesSummary, String rulesContent) {
+            this(requestId, taskId, title, goal, scope, constraints, rationale, allowedActions, status,
+                    outOfScope, acceptanceCriteria, verificationApproach, proposalSource, nonModifying,
+                    rulesPath, rulesSha256, rulesSummary, rulesContent, "");
+        }
+
+        public TaskProposal(String requestId, String taskId, String title, String goal, String scope,
+                            String constraints, String rationale, String allowedActions,
                             EngineeringTask.Status status) {
             this(requestId, taskId, title, goal, scope, constraints, rationale, allowedActions, status,
-                    "", List.of(), "", "", false);
+                    "", List.of(), "", "", false, "", "", "", "", "");
         }
 
         public TaskProposal(String requestId, String taskId, String title, String goal, String scope,
@@ -111,7 +127,18 @@ public interface EngineOsService {
                             List<String> acceptanceCriteria, String verificationApproach,
                             String proposalSource) {
             this(requestId, taskId, title, goal, scope, constraints, rationale, allowedActions, status,
-                    outOfScope, acceptanceCriteria, verificationApproach, proposalSource, false);
+                    outOfScope, acceptanceCriteria, verificationApproach, proposalSource, false,
+                    "", "", "", "", "");
+        }
+
+        public TaskProposal(String requestId, String taskId, String title, String goal, String scope,
+                            String constraints, String rationale, String allowedActions,
+                            EngineeringTask.Status status, String outOfScope,
+                            List<String> acceptanceCriteria, String verificationApproach,
+                            String proposalSource, boolean nonModifying) {
+            this(requestId, taskId, title, goal, scope, constraints, rationale, allowedActions, status,
+                    outOfScope, acceptanceCriteria, verificationApproach, proposalSource, nonModifying,
+                    "", "", "", "", "");
         }
     }
 

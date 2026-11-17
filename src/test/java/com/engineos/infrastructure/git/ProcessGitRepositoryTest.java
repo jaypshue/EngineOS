@@ -182,6 +182,34 @@ class ProcessGitRepositoryTest {
     }
 
     @Test
+    void pushesRepositoryAndSurfacesFailure() {
+        var runner = new RecordingRunner();
+        runner.add(List.of("status", "--porcelain=v1", "-b"),
+                new GitCommandResult(0, "## main\n", ""));
+        runner.add(List.of("push"), new GitCommandResult(0, "Everything up-to-date\n", ""));
+
+        var result = new ProcessGitRepository(runner).push(workspace);
+
+        assertTrue(result.succeeded());
+        assertEquals("Everything up-to-date\n", result.output());
+        assertEquals(List.of("status", "--porcelain=v1", "-b"), runner.commands.get(0));
+        assertEquals(List.of("push"), runner.commands.get(1));
+    }
+
+    @Test
+    void stagesAllWorkingTreeChanges() {
+        var runner = new RecordingRunner();
+        runner.add(List.of("status", "--porcelain=v1", "-b"),
+                new GitCommandResult(0, "## main\n M src/changed.java\n", ""));
+        runner.add(List.of("add", "--all", "--", "."), new GitCommandResult(0, "", ""));
+
+        var result = new ProcessGitRepository(runner).stageAll(workspace);
+
+        assertTrue(result.succeeded());
+        assertEquals(List.of("add", "--all", "--", "."), runner.commands.get(1));
+    }
+
+    @Test
     void convertsCommandRunnerFailuresIntoRepositoryResults() {
         GitCommandRunner failingRunner = (root, arguments) -> {
             throw new IOException("git executable unavailable");
